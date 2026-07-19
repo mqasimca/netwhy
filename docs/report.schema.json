@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://netwhy.dev/schema/report-v1.json",
+  "title": "NetWhy diagnostic report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "tool",
+    "generated_at_unix_ms",
+    "duration_ms",
+    "request",
+    "target",
+    "dns",
+    "routes",
+    "tcp",
+    "application_attempts",
+    "proxies",
+    "diagnosis",
+    "overall",
+    "exit_code"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "diagnostic_report" },
+    "tool": { "$ref": "#/$defs/tool" },
+    "generated_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "request": { "$ref": "#/$defs/request" },
+    "target": { "$ref": "#/$defs/target" },
+    "dns": { "$ref": "#/$defs/dns" },
+    "routes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/route" }
+    },
+    "tcp": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/tcp" }
+    },
+    "application_attempts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/application" }
+    },
+    "proxies": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/proxy" }
+    },
+    "diagnosis": { "$ref": "#/$defs/diagnosis" },
+    "overall": { "type": "string", "enum": ["pass", "warn", "fail"] },
+    "exit_code": { "type": "integer", "enum": [0, 1] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "overall": { "const": "pass" } } },
+      "then": {
+        "properties": {
+          "exit_code": { "const": 0 },
+          "diagnosis": {
+            "properties": { "code": { "const": "CONNECTIVITY_OK" } }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "overall": { "const": "warn" } } },
+      "then": {
+        "properties": {
+          "exit_code": { "const": 0 },
+          "diagnosis": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "ADDRESS_FAMILY_PARTIAL",
+                  "APPLICATION_ADDRESS_PARTIAL",
+                  "HTTP_ERROR_STATUS"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "overall": { "const": "fail" } } },
+      "then": {
+        "properties": {
+          "exit_code": { "const": 1 },
+          "diagnosis": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "DNS_RESOLUTION_FAILED",
+                  "TCP_CONNECTION_REFUSED",
+                  "NO_ROUTE",
+                  "TCP_TIMEOUT",
+                  "TCP_CONNECT_FAILED",
+                  "APPLICATION_CONNECT_FAILED",
+                  "TLS_HANDSHAKE_FAILED",
+                  "HTTP_EXCHANGE_FAILED"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "netwhy" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pass", "warn", "fail", "skip"]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timeout_ms",
+        "address_family",
+        "application_transport",
+        "proxy_mode"
+      ],
+      "properties": {
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "address_family": { "type": "string", "enum": ["any", "ipv4", "ipv6"] },
+        "application_transport": { "const": "direct" },
+        "proxy_mode": { "const": "detect_only" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["original", "scheme", "host", "port"],
+      "properties": {
+        "original": { "type": "string" },
+        "scheme": { "type": "string", "enum": ["tcp", "http", "https"] },
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "url": { "type": "string", "format": "uri" }
+      }
+    },
+    "dns": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "duration_ms", "addresses", "truncated"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail"] },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "addresses": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "truncated": { "type": "boolean" },
+        "error_kind": {
+          "type": "string",
+          "enum": ["address_family_mismatch", "resolver_error", "timeout", "no_addresses"]
+        },
+        "error": { "type": "string" }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "address"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail", "skip"] },
+        "address": { "type": "string" },
+        "interface": { "type": "string" },
+        "gateway": { "type": "string" },
+        "source": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": ["tool_missing", "tool_failed", "parse_error", "timeout", "no_route"]
+        },
+        "error": { "type": "string" }
+      }
+    },
+    "tcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "address", "family", "duration_ms"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail"] },
+        "address": { "type": "string" },
+        "family": { "type": "string", "enum": ["ipv4", "ipv6"] },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "error_kind": { "$ref": "#/$defs/connect_error_kind" },
+        "error": { "type": "string" }
+      }
+    },
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "protocol", "address", "connect"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "warn", "fail"] },
+        "protocol": { "type": "string", "enum": ["http", "https"] },
+        "address": { "type": "string" },
+        "connect": { "$ref": "#/$defs/connect" },
+        "tls": { "$ref": "#/$defs/tls" },
+        "http": { "$ref": "#/$defs/http" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "pass" } } },
+          "then": {
+            "properties": {
+              "connect": { "properties": { "status": { "const": "pass" } } },
+              "tls": { "properties": { "status": { "const": "pass" } } },
+              "http": { "properties": { "status": { "const": "pass" } } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "warn" } } },
+          "then": {
+            "required": ["http"],
+            "properties": {
+              "connect": { "properties": { "status": { "const": "pass" } } },
+              "tls": { "properties": { "status": { "const": "pass" } } },
+              "http": { "properties": { "status": { "const": "warn" } } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "fail" } } },
+          "then": {
+            "anyOf": [
+              { "properties": { "connect": { "properties": { "status": { "const": "fail" } } } } },
+              {
+                "required": ["tls"],
+                "properties": { "tls": { "properties": { "status": { "const": "fail" } } } }
+              },
+              {
+                "required": ["http"],
+                "properties": { "http": { "properties": { "status": { "const": "fail" } } } }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "connect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "duration_ms"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail"] },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "error_kind": { "$ref": "#/$defs/connect_error_kind" },
+        "error": { "type": "string" }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "handshake_ms", "trust_source"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail"] },
+        "handshake_ms": { "type": "integer", "minimum": 0 },
+        "trust_source": { "const": "mozilla_webpki_roots" },
+        "version": { "type": "string" },
+        "cipher_suite": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "http": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "duration_ms"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "warn", "fail"] },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "status_code": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "status_line": { "type": "string", "maxLength": 8192 },
+        "error": { "type": "string" }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "type": "string" }
+      }
+    },
+    "connect_error_kind": {
+      "type": "string",
+      "enum": [
+        "connection_refused",
+        "connection_reset",
+        "connection_aborted",
+        "not_connected",
+        "address_in_use",
+        "address_unavailable",
+        "timeout",
+        "permission_denied",
+        "network_unreachable",
+        "host_unreachable",
+        "other"
+      ]
+    },
+    "diagnosis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "summary", "suggestions", "notes"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "CONNECTIVITY_OK",
+            "DNS_RESOLUTION_FAILED",
+            "TCP_CONNECTION_REFUSED",
+            "NO_ROUTE",
+            "TCP_TIMEOUT",
+            "TCP_CONNECT_FAILED",
+            "ADDRESS_FAMILY_PARTIAL",
+            "APPLICATION_ADDRESS_PARTIAL",
+            "APPLICATION_CONNECT_FAILED",
+            "TLS_HANDSHAKE_FAILED",
+            "HTTP_EXCHANGE_FAILED",
+            "HTTP_ERROR_STATUS"
+          ]
+        },
+        "summary": { "type": "string" },
+        "likely_cause": { "type": "string" },
+        "suggestions": { "type": "array", "items": { "type": "string" } },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://netwhy.dev/schema/error-v1.json",
+  "title": "NetWhy error report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "tool", "overall", "exit_code", "error"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "error" },
+    "tool": { "$ref": "#/$defs/tool" },
+    "overall": { "const": "fail" },
+    "exit_code": { "const": 2 },
+    "error": { "$ref": "#/$defs/error" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "error": {
+            "properties": { "code": { "const": "OUTPUT_ERROR" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "properties": { "retryable": { "const": true } }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "error": {
+            "properties": { "retryable": { "const": false } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "netwhy" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "hint", "retryable"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": ["INVALID_INVOCATION", "INVALID_TARGET", "OUTPUT_ERROR"]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "hint": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" }
+      }
+    }
+  }
+}

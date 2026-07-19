@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Check minimum supported Rust version
+        run: make test-msrv
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt,llvm-tools-preview
+      - name: Check formatting, tests, and lint
+        run: make check
+      - name: Install coverage tool
+        run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+      - name: Enforce coverage floor
+        run: make coverage
+      - name: Build and package release artifact
+        run: |
+          make build
+          make package
+      - name: Test staged install and uninstall
+        run: make test-install
+      - name: Check documentation files and JSON syntax
+        run: |
+          test -f README.md
+          test -f docs/product.md
+          test -f docs/design.md
+          jq empty docs/report.schema.json
+          jq empty docs/error.schema.json

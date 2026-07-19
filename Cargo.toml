@@ -1,0 +1,48 @@
+[package]
+name = "netwhy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Explain why a network connection succeeds or fails on Linux"
+license = "MIT"
+repository = "https://github.com/mqasimca/netwhy"
+documentation = "https://docs.rs/netwhy"
+keywords = ["network", "diagnostics", "linux", "cli", "troubleshooting"]
+categories = ["command-line-utilities", "network-programming"]
+include = [
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/LICENSE",
+    "/Makefile",
+    "/README.md",
+    "/docs/**",
+    "/src/**",
+    "/tests/**",
+]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+rustls = "0.23"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.48", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
+tokio-rustls = "0.26"
+url = "2.5"
+webpki-roots = "1.0"
+
+[dev-dependencies]
+jsonschema = { version = "0.48", default-features = false }
+rcgen = { version = "=0.14.7", default-features = false, features = ["aws_lc_rs", "crypto"] }
+socket2 = "0.6"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
