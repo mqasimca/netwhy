@@ -67,7 +67,8 @@ test-install:
 	test ! -e "$$binary"
 
 install: build
-	install -Dm755 target/release/netwhy "$(DESTDIR)$(BINDIR)/netwhy"
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 755 target/release/netwhy "$(DESTDIR)$(BINDIR)/netwhy"
 
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/netwhy"

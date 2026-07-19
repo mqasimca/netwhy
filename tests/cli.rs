@@ -1,11 +1,15 @@
+#[cfg(target_os = "linux")]
 use std::{
     fs,
-    io::{Read, Write},
-    net::TcpListener,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::Child,
     sync::atomic::{AtomicU64, Ordering},
+};
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    process::{Command, Output, Stdio},
     thread,
 };
 
@@ -13,16 +17,20 @@ use netwhy::{ErrorCode, ErrorReport};
 use serde_json::Value;
 use socket2::{Domain, SockAddr, Socket, Type};
 
+#[cfg(target_os = "linux")]
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "linux")]
 struct ChildGuard(Child);
 
+#[cfg(target_os = "linux")]
 impl ChildGuard {
     fn id(&self) -> u32 {
         self.0.id()
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -37,6 +45,7 @@ fn netwhy(args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn netwhy_with_unwritable_stdout(args: &[&str]) -> Output {
     let unwritable = fs::OpenOptions::new()
         .write(true)
@@ -50,11 +59,13 @@ fn netwhy_with_unwritable_stdout(args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn unique_temp_path(label: &str) -> PathBuf {
     let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("netwhy-{label}-{}-{id}", std::process::id()))
 }
 
+#[cfg(target_os = "linux")]
 fn user_namespaces_available() -> bool {
     Command::new("unshare")
         .args(["--user", "--map-root-user", "true"])
@@ -65,6 +76,7 @@ fn user_namespaces_available() -> bool {
         .is_ok_and(|status| status.success())
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_ready_file(path: &Path, child: &mut ChildGuard) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
@@ -159,6 +171,7 @@ fn assert_error_schema_rejects(value: &Value) {
     assert!(validator.iter_errors(value).next().is_some());
 }
 
+#[cfg(target_os = "linux")]
 fn netwhy_with_fake_ip(args: &[&str], script: &str) -> Output {
     let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let directory =
@@ -181,10 +194,12 @@ fn netwhy_with_fake_ip(args: &[&str], script: &str) -> Output {
     output
 }
 
+#[cfg(target_os = "linux")]
 fn netwhy_with_fake_runtime(runtime: &str, args: &[&str], script: &str) -> Output {
     netwhy_with_fake_runtime_env(runtime, args, script, &[])
 }
 
+#[cfg(target_os = "linux")]
 fn netwhy_with_fake_runtime_env(
     runtime: &str,
     args: &[&str],
@@ -352,6 +367,35 @@ fn all_cli_validation_failures_are_structured_in_json_mode() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn apple_silicon_macos_rejects_linux_execution_context_options() {
+    for args in [
+        ["--json", "--pid", "42", "127.0.0.1:9"],
+        ["--json", "--docker", "web", "127.0.0.1:9"],
+        ["--json", "--podman", "api", "127.0.0.1:9"],
+    ] {
+        let output = netwhy(&args);
+
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        assert!(output.stderr.is_empty(), "args: {args:?}");
+        let error = parse_json(&output);
+        assert_eq!(error["error"]["code"], "CONTEXT_UNAVAILABLE");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("requires Linux"))
+        );
+        assert!(
+            error["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("Run local diagnosis"))
+        );
+        assert_error_schema(&error);
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn missing_process_context_is_a_structured_json_error() {
     let output = netwhy(&["--json", "--pid", &u32::MAX.to_string(), "127.0.0.1:9"]);
 
@@ -364,6 +408,7 @@ fn missing_process_context_is_a_structured_json_error() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn missing_process_context_is_a_human_readable_error() {
     let output = netwhy(&["--pid", &u32::MAX.to_string(), "127.0.0.1:9"]);
 
@@ -376,6 +421,7 @@ fn missing_process_context_is_a_human_readable_error() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn selected_process_context_and_proxy_environment_are_reported() {
     let process = Command::new("/bin/sleep")
         .arg("30")
@@ -437,6 +483,7 @@ fn selected_process_context_and_proxy_environment_are_reported() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn docker_and_podman_contexts_are_resolved_and_reported() {
     let (_reservation, address) = reserved_refused_address();
     let target = address.to_string();
@@ -496,6 +543,7 @@ printf '%s\n' "$PPID"
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn container_identifier_cannot_be_parsed_as_a_runtime_option() {
     let (_reservation, address) = reserved_refused_address();
     let target = address.to_string();
@@ -532,6 +580,7 @@ printf '%s\n' "$PPID"
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn unavailable_or_failing_container_runtimes_are_structured_errors() {
     let missing = Command::new(env!("CARGO_BIN_EXE_netwhy"))
         .args(["--json", "--docker", "fixture", "127.0.0.1:9"])
@@ -565,6 +614,7 @@ fn unavailable_or_failing_container_runtimes_are_structured_errors() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn remote_container_runtimes_are_rejected_before_pid_resolution() {
     for (runtime, flag, script) in [
         (
@@ -591,6 +641,7 @@ fn remote_container_runtimes_are_rejected_before_pid_resolution() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn docker_host_locality_is_validated_without_running_a_context_command() {
     let (_reservation, address) = reserved_refused_address();
     let target = address.to_string();
@@ -633,6 +684,7 @@ printf '%s\n' "$PPID"
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn container_restart_during_context_preparation_is_rejected() {
     let state_file = unique_temp_path("runtime-state");
     let script = r#"#!/bin/sh
@@ -669,6 +721,7 @@ fi
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn container_pid_that_is_absent_from_local_proc_is_rejected() {
     let output = netwhy_with_fake_runtime(
         "podman",
@@ -694,6 +747,7 @@ fn container_pid_that_is_absent_from_local_proc_is_rejected() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn container_runtime_inspection_honors_the_timeout() {
     let started = std::time::Instant::now();
     let output = netwhy_with_fake_runtime(
@@ -722,6 +776,7 @@ fn container_runtime_inspection_honors_the_timeout() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn container_runtime_descendants_cannot_extend_the_operation_deadline() {
     let (_reservation, address) = reserved_refused_address();
     let target = address.to_string();
@@ -752,6 +807,7 @@ fi
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn enters_real_mount_root_and_network_namespaces() {
     if !user_namespaces_available() {
         eprintln!("skipping: unprivileged user namespaces are unavailable");
@@ -817,6 +873,7 @@ exit $?
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn rejects_a_namespace_owned_by_an_unavailable_user_context() {
     if !user_namespaces_available() {
         eprintln!("skipping: unprivileged user namespaces are unavailable");
@@ -1034,6 +1091,7 @@ fn http_exchange_timeout_is_a_structured_cli_failure() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn missing_iproute2_is_skipped_without_failing_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -1055,6 +1113,27 @@ fn missing_iproute2_is_skipped_without_failing_connection() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn apple_silicon_macos_uses_native_route_evidence() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = listener.local_addr().unwrap().to_string();
+    let output = netwhy(&["--json", &target, "--timeout-ms", "500"]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let report = parse_json(&output);
+    assert_eq!(report["overall"], "pass");
+    assert_eq!(report["routes"][0]["status"], "pass");
+    assert!(
+        report["routes"][0]["interface"]
+            .as_str()
+            .is_some_and(|interface| !interface.is_empty())
+    );
+    assert_report_schema(&report);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn failed_iproute2_command_is_evidence_but_not_a_false_failure() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -1073,6 +1152,38 @@ fn failed_iproute2_command_is_evidence_but_not_a_false_failure() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn scoped_ipv6_target_preserves_scope_and_uses_the_interface_for_route_lookup() {
+    let interface_index = nix::net::if_::if_nametoindex("lo").unwrap();
+    let target = format!("[fe80::1%{interface_index}]:9");
+    let output = netwhy_with_fake_ip(
+        &["--json", &target, "--timeout-ms", "250"],
+        r#"#!/bin/sh
+if [ "$*" != "-j -6 route get fe80::1 oif lo" ]; then
+    printf 'unexpected route arguments: %s\n' "$*" >&2
+    exit 2
+fi
+printf '[{"dev":"lo"}]\n'
+"#,
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let report = parse_json(&output);
+    assert_eq!(
+        report["target"]["host"],
+        format!("fe80::1%{interface_index}")
+    );
+    assert_eq!(report["dns"]["addresses"][0], target);
+    assert_eq!(report["routes"][0]["address"], target);
+    assert_eq!(report["routes"][0]["status"], "pass");
+    assert_eq!(report["routes"][0]["interface"], "lo");
+    assert_eq!(report["tcp"][0]["address"], target);
+    assert_report_schema(&report);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn malformed_iproute2_json_is_reported_without_hiding_tcp_success() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -1096,6 +1207,7 @@ fn malformed_iproute2_json_is_reported_without_hiding_tcp_success() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn oversized_iproute2_output_is_bounded_without_hiding_tcp_success() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let target = listener.local_addr().unwrap().to_string();
@@ -1117,6 +1229,7 @@ fn oversized_iproute2_output_is_bounded_without_hiding_tcp_success() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn iproute2_descendants_cannot_extend_the_operation_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let target = listener.local_addr().unwrap().to_string();
@@ -1154,6 +1267,7 @@ fn closed_output_pipe_does_not_turn_a_diagnosis_into_an_internal_error() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn unwritable_stdout_is_reported_for_human_and_json_output() {
     let (_reservation, address) = reserved_refused_address();
     let target = address.to_string();
@@ -1235,6 +1349,7 @@ fn proxy_credentials_are_redacted_before_json_serialization() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn route_helper_timeout_is_bounded_and_structured() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let target = listener.local_addr().unwrap().to_string();

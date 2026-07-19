@@ -61,7 +61,7 @@ Error documents use stable `error.code` values:
 | --- | --- |
 | `INVALID_INVOCATION` | Command-line arguments are missing, unknown, conflicting, or invalid. |
 | `INVALID_TARGET` | The target syntax or scheme is unsupported. |
-| `CONTEXT_UNAVAILABLE` | The selected process or container disappeared, its context could not be inspected, its runtime was remote, or required namespace/root capabilities were unavailable. |
+| `CONTEXT_UNAVAILABLE` | The selected process or container disappeared, its context could not be inspected, its runtime was remote, required namespace/root capabilities were unavailable, or a Linux-only context selector was requested on macOS. |
 | `OUTPUT_ERROR` | NetWhy could not write or serialize its result. |
 
 Messages, summaries, hints, and suggestions are for display and may improve within a schema version. Consumers must branch on codes and statuses, not English text.

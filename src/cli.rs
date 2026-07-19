@@ -7,7 +7,7 @@ use clap::Parser;
     version,
     about,
     color = clap::ColorChoice::Never,
-    long_about = "Trace a connection through DNS, Linux routing, TCP, TLS, and HTTP, then explain the most likely failure."
+    long_about = "Trace a connection through DNS, system routing, TCP, TLS, and HTTP, then explain the most likely failure."
 )]
 pub struct Cli {
     /// URL, hostname, IP address, or host:port to diagnose
@@ -25,7 +25,7 @@ pub struct Cli {
     )]
     pub pid: Option<u32>,
 
-    /// Diagnose from the context of a running Docker container
+    /// Diagnose from the context of a running Docker container (Linux only)
     #[arg(
         long,
         value_name = "CONTAINER",
@@ -34,7 +34,7 @@ pub struct Cli {
     )]
     pub docker: Option<String>,
 
-    /// Diagnose from the context of a running Podman container
+    /// Diagnose from the context of a running Podman container (Linux only)
     #[arg(
         long,
         value_name = "CONTAINER",

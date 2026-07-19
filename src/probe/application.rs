@@ -501,11 +501,8 @@ fn tls_connector(roots: RootCertStore) -> TlsConnector {
 mod tests {
     use std::{future::pending, sync::Arc, time::Duration};
 
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
-    use rustls::{
-        RootCertStore, ServerConfig,
-        pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
-    };
+    use rustls::{RootCertStore, ServerConfig};
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, duplex},
         net::{TcpListener, TcpStream},
@@ -553,11 +550,14 @@ mod tests {
 
     #[tokio::test]
     async fn validates_a_trusted_tls_server() {
-        let CertifiedKey { cert, signing_key } =
-            generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-        let cert_der = cert.der().clone();
-        let private_key =
-            PrivateKeyDer::from(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+        let cert_der = CertificateDer::from_pem_slice(include_bytes!(
+            "../../tests/fixtures/tls/localhost-cert.pem"
+        ))
+        .unwrap();
+        let private_key = PrivateKeyDer::from_pem_slice(include_bytes!(
+            "../../tests/fixtures/tls/localhost-key.pem"
+        ))
+        .unwrap();
         let server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(vec![cert_der.clone()], private_key)
@@ -583,7 +583,7 @@ mod tests {
 
         let result = probe_https_with_roots(&target, address, Duration::from_secs(1), roots).await;
 
-        assert_eq!(result.status, Status::Pass);
+        assert_eq!(result.status, Status::Pass, "{result:#?}");
         let tls = result.tls.unwrap();
         assert_eq!(tls.status, Status::Pass);
         assert_eq!(tls.trust_source, "custom_roots");

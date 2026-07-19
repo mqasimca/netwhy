@@ -47,6 +47,7 @@ For focused development, use `make test-unit`, `make test-integration`, or `make
 - [x] Route parsing uses captured iproute2 JSON.
 - [x] Rust 1.85 minimum-version build passes.
 - [x] Stable formatting, tests, and Clippy with denied warnings pass.
+- [x] The locked dependency graph passes the RustSec advisory audit.
 - [x] LLVM coverage exceeds 90% lines, 90% regions, and 95% functions.
 - [x] Every measured source file exceeds 80% line coverage.
 - [x] Release binary builds with the locked dependency graph.
@@ -59,10 +60,11 @@ The following remain later-version work and do not block v0.1:
 
 - v0.2 release qualification for `--pid` across supported Linux environments;
 - v0.2 Docker and Podman context adapters (implemented in the development tree but outside this v0.1 boundary);
+- v0.2 Apple Silicon macOS local diagnosis and native route evidence;
 - proxy-transport probing;
 - nftables verdict tracing;
 - active MTU diagnosis;
 - report comparison;
-- distribution-specific packages and public release automation.
+- distribution-specific packages and public release automation (implemented in the development tree but outside the v0.1 boundary).
 
-The current development tree includes `--pid`, local Docker and Podman adapters, same-context subprocess coverage, real isolated mount/network/root entry, and the cross-user-namespace denial path. This historical v0.1 checklist does not promote that work into the v0.1 acceptance boundary. See the [v0.2 release checklist](v0.2-release-checklist.md) for the active boundary.
+The current development tree includes `--pid`, local Docker and Podman adapters, same-context subprocess coverage, real isolated mount/network/root entry, the cross-user-namespace denial path, and public release automation. This historical v0.1 checklist does not promote that work into the v0.1 acceptance boundary. See the [v0.2 release checklist](v0.2-release-checklist.md) for the active boundary.

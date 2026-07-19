@@ -5,12 +5,16 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "linux")]
 mod container_context;
+#[cfg(target_os = "linux")]
 mod process_context;
 
 use clap::Parser;
+#[cfg(target_os = "linux")]
 use container_context::{ContainerRuntime, ensure_container_pid_unchanged, resolve_container_pid};
 use netwhy::{DiagnosticContext, ErrorCode, ErrorReport, cli::Cli, diagnose_with_context, output};
+#[cfg(target_os = "linux")]
 use process_context::PreparedProcessContext;
 use serde::Serialize;
 use tokio::runtime::{Builder, Runtime};
@@ -86,6 +90,30 @@ fn parse_cli(args: Vec<OsString>, json_requested: bool) -> Result<Cli, ExitCode>
 }
 
 fn prepare_context(cli: &Cli) -> anyhow::Result<DiagnosticContext> {
+    ensure_context_supported(cli, cfg!(target_os = "linux"))?;
+
+    #[cfg(target_os = "linux")]
+    {
+        prepare_linux_context(cli)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(DiagnosticContext::current())
+    }
+}
+
+fn ensure_context_supported(cli: &Cli, linux_available: bool) -> anyhow::Result<()> {
+    if !linux_available && (cli.pid.is_some() || cli.docker.is_some() || cli.podman.is_some()) {
+        anyhow::bail!(
+            "{} execution-context selection requires Linux; Apple Silicon macOS supports local diagnosis only",
+            context_kind(cli)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_context(cli: &Cli) -> anyhow::Result<DiagnosticContext> {
     if let Some(pid) = cli.pid {
         return PreparedProcessContext::prepare(pid)?.enter();
     }
@@ -123,7 +151,11 @@ fn context_kind(cli: &Cli) -> &'static str {
 }
 
 fn context_hint(cli: &Cli) -> &'static str {
-    if cli.podman.is_some() {
+    if !cfg!(target_os = "linux")
+        && (cli.pid.is_some() || cli.docker.is_some() || cli.podman.is_some())
+    {
+        "Run local diagnosis without --pid, --docker, or --podman. Execution-context selection requires Linux."
+    } else if cli.podman.is_some() {
         "Check that the container is running and Podman is installed and accessible. For rootless Podman, run NetWhy through `podman unshare`; otherwise grant CAP_SYS_ADMIN and CAP_SYS_CHROOT when namespaces or root differ."
     } else if cli.docker.is_some() {
         "Check that the container is running, its runtime is installed and accessible, and grant CAP_SYS_ADMIN and CAP_SYS_CHROOT when its namespaces or root differ."
@@ -249,7 +281,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{build_runtime, requests_json, shutdown_runtime};
+    use clap::Parser;
+    use netwhy::cli::Cli;
+
+    use super::{build_runtime, ensure_context_supported, requests_json, shutdown_runtime};
 
     #[test]
     fn json_prescan_stops_at_the_option_terminator() {
@@ -279,5 +314,22 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "runtime shutdown waited for an abandoned blocking task"
         );
+    }
+
+    #[test]
+    fn non_linux_targets_reject_execution_context_selection() {
+        for args in [
+            vec!["netwhy", "--pid", "42", "example.test"],
+            vec!["netwhy", "--docker", "web", "example.test"],
+            vec!["netwhy", "--podman", "api", "example.test"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let error = ensure_context_supported(&cli, false).unwrap_err();
+            assert!(error.to_string().contains("requires Linux"));
+            assert!(error.to_string().contains("local diagnosis only"));
+        }
+
+        let local = Cli::try_parse_from(["netwhy", "example.test"]).unwrap();
+        ensure_context_supported(&local, false).unwrap();
     }
 }

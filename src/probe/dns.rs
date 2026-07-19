@@ -24,8 +24,15 @@ pub async fn resolve(
 ) -> DnsResult {
     let started = Instant::now();
 
-    if let Ok(ip) = target.host.parse::<IpAddr>() {
-        if (ipv4_only && ip.is_ipv6()) || (ipv6_only && ip.is_ipv4()) {
+    let literal_address = target.literal_address.or_else(|| {
+        target
+            .host
+            .parse::<IpAddr>()
+            .ok()
+            .map(|ip| (ip, target.port).into())
+    });
+    if let Some(address) = literal_address {
+        if (ipv4_only && address.is_ipv6()) || (ipv6_only && address.is_ipv4()) {
             return DnsResult {
                 status: Status::Fail,
                 duration_ms: started.elapsed().as_millis(),
@@ -34,7 +41,7 @@ pub async fn resolve(
                 error_kind: Some("address_family_mismatch".to_owned()),
                 error: Some(format!(
                     "target is {}, but the requested address family is {}",
-                    if ip.is_ipv4() { "IPv4" } else { "IPv6" },
+                    if address.is_ipv4() { "IPv4" } else { "IPv6" },
                     if ipv4_only { "IPv4" } else { "IPv6" }
                 )),
             };
@@ -43,7 +50,7 @@ pub async fn resolve(
         return DnsResult {
             status: Status::Pass,
             duration_ms: started.elapsed().as_millis(),
-            addresses: vec![(ip, target.port).into()],
+            addresses: vec![address],
             truncated: false,
             error_kind: None,
             error: None,
@@ -149,7 +156,12 @@ fn resolved_result(
 
 #[cfg(test)]
 mod tests {
-    use std::{future::pending, future::ready, io, time::Instant};
+    use std::{
+        future::pending,
+        future::ready,
+        io,
+        time::{Duration, Instant},
+    };
 
     use super::{resolve, resolve_lookup, resolved_result};
     use crate::{model::Status, target::Target};
@@ -266,6 +278,16 @@ mod tests {
         assert_eq!(v4.error_kind.as_deref(), Some("address_family_mismatch"));
         assert_eq!(v6.status, Status::Fail);
         assert_eq!(v6.error_kind.as_deref(), Some("address_family_mismatch"));
+    }
+
+    #[tokio::test]
+    async fn preserves_the_scope_id_of_an_ipv6_socket_literal() {
+        let target = Target::parse("[fe80::1%3]:443").unwrap();
+
+        let result = resolve(&target, false, false, Duration::from_secs(1)).await;
+
+        assert_eq!(result.status, Status::Pass);
+        assert_eq!(result.addresses, vec!["[fe80::1%3]:443".parse().unwrap()]);
     }
 
     #[tokio::test]

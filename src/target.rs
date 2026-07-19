@@ -12,6 +12,7 @@ pub struct Target {
     pub host: String,
     pub port: u16,
     pub url: Option<Url>,
+    pub(crate) literal_address: Option<SocketAddr>,
 }
 
 impl Target {
@@ -33,9 +34,10 @@ impl Target {
             return Ok(Self {
                 original: input.to_owned(),
                 scheme: "tcp".to_owned(),
-                host: socket.ip().to_string(),
+                host: socket_host(socket),
                 port: socket.port(),
                 url: None,
+                literal_address: Some(socket),
             });
         }
 
@@ -75,13 +77,13 @@ impl Target {
             );
         }
 
-        let host = match url
+        let (host, literal_ip) = match url
             .host()
             .context("target must include a hostname or IP address")?
         {
-            Host::Domain(host) => host.to_owned(),
-            Host::Ipv4(host) => host.to_string(),
-            Host::Ipv6(host) => host.to_string(),
+            Host::Domain(host) => (host.to_owned(), None),
+            Host::Ipv4(host) => (host.to_string(), Some(IpAddr::V4(host))),
+            Host::Ipv6(host) => (host.to_string(), Some(IpAddr::V6(host))),
         };
         let port = url
             .port_or_known_default()
@@ -97,6 +99,7 @@ impl Target {
             host,
             port,
             url: application_url,
+            literal_address: literal_ip.map(|ip| (ip, port).into()),
         })
     }
 
@@ -158,6 +161,15 @@ impl Target {
     }
 }
 
+fn socket_host(socket: SocketAddr) -> String {
+    match socket {
+        SocketAddr::V6(socket) if socket.scope_id() != 0 => {
+            format!("{}%{}", socket.ip(), socket.scope_id())
+        }
+        _ => socket.ip().to_string(),
+    }
+}
+
 fn redact_query_and_fragment(value: &str) -> String {
     let query = value.find('?');
     let fragment = value.find('#');
@@ -213,6 +225,17 @@ mod tests {
         let target = Target::parse("[::1]:8080").unwrap();
         assert_eq!(target.host, "::1");
         assert_eq!(target.port, 8080);
+    }
+
+    #[test]
+    fn preserves_a_scoped_ipv6_socket() {
+        let target = Target::parse("[fe80::1%3]:8080").unwrap();
+
+        assert_eq!(target.host, "fe80::1%3");
+        assert_eq!(
+            target.literal_address,
+            Some("[fe80::1%3]:8080".parse().unwrap())
+        );
     }
 
     #[test]

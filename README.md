@@ -1,8 +1,8 @@
 # NetWhy
 
-NetWhy is a read-only Linux CLI that explains why a network connection succeeds or fails.
+NetWhy is a read-only Linux and Apple Silicon macOS CLI that explains why a network connection succeeds or fails.
 
-Linux already provides excellent low-level tools for DNS, routes, sockets, TLS, and HTTP. The difficult part is correlating their output. NetWhy follows one connection through those layers and turns the evidence into a concise, deterministic diagnosis.
+Linux and macOS already provide excellent low-level tools for DNS, routes, sockets, TLS, and HTTP. The difficult part is correlating their output. NetWhy follows one connection through those layers and turns the evidence into a concise, deterministic diagnosis.
 
 ```text
 $ netwhy https://api.example.com
@@ -35,6 +35,12 @@ Evidence:
 - **Evidence before advice:** show the observations supporting every conclusion.
 - **Privacy-aware:** redact credentials and avoid collecting unrelated system state.
 
+## Platform support
+
+- **Linux:** full local diagnosis plus `--pid`, `--docker`, and `--podman` execution-context selection.
+- **Apple Silicon macOS (`aarch64-apple-darwin`):** local DNS, native route, TCP, TLS, and HTTP diagnosis. Linux execution-context selectors return a structured `CONTEXT_UNAVAILABLE` error instead of being ignored.
+- **Intel macOS and other operating systems:** unsupported.
+
 ## v0.1 scope
 
 The first release diagnoses a target from the current Linux network namespace:
@@ -47,7 +53,7 @@ The first release diagnoses a target from the current Linux network namespace:
 6. Explain the most likely failure and suggest focused follow-up checks.
 7. Produce outcome-first human output or a versioned, coded JSON report.
 
-The current development tree implements the v0.2 execution-context features: process selection via `--pid` and local Docker or Podman container selection via `--docker` and `--podman`. Cross-environment release qualification remains before v0.2 can be published. Firewall verdict tracing, MTU diagnosis, proxy execution, and report comparison remain deferred. See [the product roadmap](docs/product.md).
+The current development tree implements the v0.2 execution-context features on Linux and local diagnosis on Apple Silicon macOS. Cross-environment release qualification remains before v0.2 can be published. Firewall verdict tracing, MTU diagnosis, proxy execution, and report comparison remain deferred. See [the product roadmap](docs/product.md).
 
 ## Command contract
 
@@ -60,8 +66,8 @@ Arguments:
 Options:
       --json                 Emit a versioned JSON report
       --pid <PID>            Diagnose from the network, mount, root, and proxy context of a Linux process
-      --docker <CONTAINER>   Diagnose from a running container managed by a local Docker runtime
-      --podman <CONTAINER>   Diagnose from a running container managed by a local Podman runtime
+      --docker <CONTAINER>   Diagnose from a running container managed by a local Docker runtime (Linux only)
+      --podman <CONTAINER>   Diagnose from a running container managed by a local Podman runtime (Linux only)
       --ipv4                 Test IPv4 addresses only
       --ipv6                 Test IPv6 addresses only
       --timeout-ms <MILLIS>  Per-operation DNS, route, TCP, TLS, and HTTP timeout [default: 3000]
@@ -79,6 +85,7 @@ Target interpretation is intentionally predictable:
 | `example.com:5432` | Raw TCP on port 5432 |
 | `192.0.2.10` | HTTPS on port 443 |
 | `[2001:db8::10]:443` | Raw TCP on port 443 |
+| `[fe80::1%3]:443` | Raw TCP on port 443 using IPv6 interface scope index 3 |
 
 Exit codes:
 
@@ -104,7 +111,7 @@ Rootless Podman owns its container namespaces from Podman's user namespace. Run 
 podman unshare netwhy --podman my-container https://example.com
 ```
 
-Route inspection uses `ip -j route get` when iproute2 is available. Each helper invocation is time-bounded, runs in an isolated process group, and retains at most 64 KiB from each output stream. If iproute2 is missing, NetWhy skips that evidence and continues with real TCP attempts.
+Route inspection uses `ip -j route get` on Linux and `/sbin/route -n get` on Apple Silicon macOS. Linux reports the interface, gateway, and preferred source when available; macOS reports the interface and gateway exposed by its native route utility. Each helper invocation is time-bounded, runs in an isolated process group, and retains at most 64 KiB from each output stream. If the platform route utility is missing, NetWhy skips that evidence and continues with real TCP attempts.
 
 Reports reject target URL credentials, redact target query strings and fragments, and record the effective timeout, address-family selection, application transport, execution context, required capabilities, and TLS trust source. DNS evidence is capped at 32 unique addresses to keep resource use predictable.
 
@@ -118,7 +125,7 @@ Reports reject target URL credentials, redact target query strings and fragments
 
 ## Development
 
-NetWhy requires Rust 1.85 or newer. Stable Rust is recommended.
+NetWhy requires Rust 1.85 or newer. Stable Rust is recommended. Supported build targets are Linux and `aarch64-apple-darwin`; Intel macOS is intentionally unsupported.
 
 ```bash
 cargo build
@@ -141,6 +148,8 @@ make verify
 ```
 
 `make verify` runs `make check`, enforces coverage, tests with Rust 1.85, builds and verifies the Cargo package, and exercises staged installation, `--help`, `--version`, and uninstallation. It requires the Rust 1.85 toolchain and `cargo-llvm-cov`; it does not require a public network service.
+
+The network-backed RustSec advisory audit is enforced separately in CI and before tagged releases. Run it locally with `cargo audit --file Cargo.lock` after installing `cargo-audit`.
 
 Measure coverage with `cargo-llvm-cov`. The checked target requires at least 90% line coverage, 90% region coverage, and 95% function coverage:
 
@@ -188,6 +197,22 @@ Build a local Cargo package without requiring a commit:
 ```bash
 make package
 ```
+
+## Creating a release
+
+Set the package version in `Cargo.toml`, update `Cargo.lock`, run `make verify`, and push the release commit. Then create and push a matching tag:
+
+```bash
+git tag -a v0.2.0 -m "NetWhy v0.2.0"
+git push origin v0.2.0
+```
+
+The release workflow requires the tag to exactly match the package version. It runs the complete Linux release gate and native Apple Silicon tests before creating or updating the GitHub Release for that tag with these assets:
+
+- `netwhy-v<VERSION>-x86_64-unknown-linux-gnu.tar.gz` and its SHA-256 checksum;
+- `netwhy-v<VERSION>-aarch64-apple-darwin.tar.gz` and its SHA-256 checksum.
+
+Each archive contains the release binary, `README.md`, and `LICENSE`. Rerunning the workflow replaces matching assets, while a prerelease package version such as `0.2.0-rc.1` creates a prerelease.
 
 See the historical [v0.1 release checklist](docs/release-checklist.md) and the current [v0.2 release checklist](docs/v0.2-release-checklist.md) for the exact verification contracts.
 

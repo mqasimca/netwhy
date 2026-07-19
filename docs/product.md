@@ -2,7 +2,7 @@
 
 ## Problem
 
-When a Linux application cannot connect, users usually have to combine several commands and mentally correlate their output:
+When an application cannot connect on Linux or Apple Silicon macOS, users usually have to combine several commands and mentally correlate their output:
 
 - resolver configuration and DNS answers;
 - IPv4 and IPv6 routing decisions;
@@ -22,7 +22,7 @@ NetWhy's job is to answer one bounded question:
 ## Initial users
 
 - Developers diagnosing “works on my machine” failures.
-- Linux users affected by VPN, DNS, IPv6, or proxy problems.
+- Linux and Apple Silicon macOS users affected by VPN, DNS, IPv6, or proxy problems.
 - Operators performing first-response diagnosis on a server.
 - Support engineers who need a small, redacted, machine-readable report.
 - Automation that needs to distinguish DNS, route, transport, TLS, and HTTP failures.
@@ -30,7 +30,7 @@ NetWhy's job is to answer one bounded question:
 ## User promises
 
 1. **A result in one command.** A normal diagnosis should not require users to select the underlying tools.
-2. **A conclusion backed by evidence.** The report includes per-address results and the selected Linux route.
+2. **A conclusion backed by evidence.** The report includes per-address results and the selected platform route.
 3. **No automatic repair.** NetWhy may suggest commands, but v0.1 never changes the machine.
 4. **Stable automation.** JSON is versioned and exit codes have documented meaning.
 5. **Graceful degradation.** Missing optional capabilities produce `skip`, not a false failure.
@@ -102,9 +102,10 @@ The wording must distinguish evidence from inference. For example, a timeout sup
 - [x] Resolver and proxy environment captured from the selected process.
 - [x] Explicit privilege and capability reporting.
 - [x] Capability-aware isolated mount/network namespace integration fixtures.
-- [ ] Release qualification across supported Linux environments.
+- [x] Apple Silicon macOS local diagnosis and native route backend.
+- [ ] Release qualification across supported Linux and Apple Silicon macOS environments.
 
-The checked items are implemented in the current development tree. They are not a published v0.2 release; the remaining gate is real-runtime qualification across the supported Linux environments in the [v0.2 release checklist](v0.2-release-checklist.md).
+The checked items are implemented in the current development tree. They are not a published v0.2 release; the remaining gate is native qualification across the supported Linux and Apple Silicon macOS environments in the [v0.2 release checklist](v0.2-release-checklist.md).
 
 ### v0.3 — Deeper Linux path evidence
 
@@ -126,4 +127,4 @@ The checked items are implemented in the current development tree. They are not 
 - **Probe mismatch:** an application's resolver, proxy, or TLS configuration may differ from NetWhy's. Reports must state the context and transport used.
 - **Sensitive output:** proxy credentials, internal hostnames, and addresses may be confidential. Credentials must be redacted by default.
 - **Side effects at the target:** HTTP `HEAD` is defined as safe, but broken servers may mishandle it. The CLI must document that it performs active probes.
-- **Platform scope creep:** v0.1 targets Linux. Portable protocol probes are useful elsewhere, but Linux route and namespace evidence is the differentiator.
+- **Platform scope creep:** Linux retains the full execution-context feature set. Apple Silicon macOS is deliberately limited to local diagnosis and native route evidence; other platforms remain unsupported.

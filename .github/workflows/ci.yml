@@ -7,7 +7,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  security-audit:
+    name: Dependency security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ github.token }}
+
   msrv:
     runs-on: ubuntu-latest
     steps:
@@ -42,3 +55,22 @@ jobs:
           test -f docs/design.md
           jq empty docs/report.schema.json
           jq empty docs/error.schema.json
+
+  macos-apple-silicon:
+    name: Apple Silicon macOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Confirm Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Check formatting, tests, and lint
+        run: make check
+      - name: Build and package release artifact
+        run: |
+          make build
+          make package
+      - name: Test staged install and uninstall
+        run: make test-install

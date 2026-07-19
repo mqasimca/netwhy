@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Match tag to package version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml)"
+          if [[ -z "$package_version" ]]; then
+            echo "Could not read the package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "v${package_version}" ]]; then
+            echo "Release tag $GITHUB_REF_NAME must match Cargo.toml version v${package_version}" >&2
+            exit 1
+          fi
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify Linux release gate
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Audit dependency advisories
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt,llvm-tools-preview
+      - name: Install minimum supported Rust version
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Install coverage tool
+        run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+      - name: Run complete release gate
+        run: make verify
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [validate, verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: Apple Silicon macOS
+            os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Confirm native build target
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          if [[ "$host" != "$TARGET" ]]; then
+            echo "Expected native target $TARGET, found $host" >&2
+            exit 1
+          fi
+      - name: Test and lint Apple Silicon macOS
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: make check
+      - name: Build release binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Package release archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive_root="netwhy-v${VERSION}-${TARGET}"
+          staging="$(mktemp -d)"
+          trap 'rm -rf -- "$staging"' EXIT
+
+          mkdir -p "$staging/$archive_root" dist
+          install -m 755 "target/$TARGET/release/netwhy" "$staging/$archive_root/netwhy"
+          install -m 644 README.md LICENSE "$staging/$archive_root/"
+          "$staging/$archive_root/netwhy" --version | grep -Fx "netwhy $VERSION"
+
+          archive="dist/${archive_root}.tar.gz"
+          tar -C "$staging" -czf "$archive" "$archive_root"
+          digest="$(openssl dgst -sha256 "$archive" | awk '{print $NF}')"
+          printf '%s  %s\n' "$digest" "$(basename "$archive")" > "${archive}.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          checksums=(dist/*.tar.gz.sha256)
+          if (( ${#archives[@]} != 2 || ${#checksums[@]} != 2 )); then
+            echo "Expected two release archives and two checksums" >&2
+            exit 1
+          fi
+          (cd dist && sha256sum -c ./*.tar.gz.sha256)
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/*.tar.gz dist/*.tar.gz.sha256)
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            create_args=(release create "$TAG" "${assets[@]}" --verify-tag --generate-notes --title "$TAG")
+            if [[ "$VERSION" == *-* ]]; then
+              create_args+=(--prerelease)
+            fi
+            gh "${create_args[@]}"
+          fi

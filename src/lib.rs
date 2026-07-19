@@ -1,3 +1,6 @@
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
+compile_error!("NetWhy supports Linux and Apple Silicon macOS targets");
+
 pub mod cli;
 mod diagnosis;
 mod model;

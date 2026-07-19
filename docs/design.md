@@ -5,7 +5,7 @@
 NetWhy is organized as a pipeline with a separate inference layer:
 
 ```text
-current process, --pid, --docker, or --podman context
+current process, or Linux --pid, --docker, or --podman context
     │
     ▼
 target parser
@@ -34,9 +34,9 @@ Probe modules collect facts and do not decide the final cause. The diagnosis mod
 | --- | --- |
 | `container_context` | Reject remote runtimes, resolve a local Docker or Podman container to its init PID, and bound runtime command time and output. |
 | `process_context` | Inspect a selected PID, enter differing Linux mount/network namespaces and root before runtime startup, and capture only supported proxy variables. |
-| `target` | Parse supported input forms into a normalized scheme, host, port, and optional URL. |
+| `target` | Parse supported input forms into a normalized scheme, host, port, optional URL, and complete literal socket address (including an IPv6 scope ID). |
 | `probe::dns` | Resolve with the process's system resolver and apply the requested address-family filter. |
-| `probe::route` | Run `ip -j route get` for each destination and extract interface, gateway, and preferred source. |
+| `probe::route` | Run the native platform route lookup for each destination and extract the route fields it exposes. |
 | `probe::tcp` | Connect to all resolved socket addresses concurrently with independent timeouts. |
 | `probe::application` | Try TCP-successful addresses in latency order until the application protocol is reachable, validating TLS when required and issuing an HTTP `HEAD`. |
 | `diagnosis` | Apply explicit precedence rules and separate observed failures from likely causes. |
@@ -45,7 +45,7 @@ Probe modules collect facts and do not decide the final cause. The diagnosis mod
 ## Ordering and continuation
 
 - DNS must produce at least one usable address before route or TCP probes can run.
-- Route inspection and TCP connection are independent evidence. A failed or skipped `ip route` command does not suppress a real connection attempt.
+- Route inspection and TCP connection are independent evidence. A failed or skipped route command does not suppress a real connection attempt.
 - All resolved addresses are tested concurrently to expose asymmetric IPv4/IPv6 behavior.
 - The application probe starts with the fastest address that completed TCP successfully. If that address fails during its fresh connection, TLS, or HTTP exchange, NetWhy tries the next TCP-successful address and retains every attempt.
 - TLS and HTTP use a fresh connection. This avoids transferring ownership of probe sockets and makes timing for each stage explicit.
@@ -56,7 +56,7 @@ Probe modules collect facts and do not decide the final cause. The diagnosis mod
 `--timeout-ms` applies independently to:
 
 - system DNS resolution;
-- each iproute2 route inspection;
+- each native route inspection;
 - each TCP connection attempt;
 - the application probe's fresh TCP connection;
 - the TLS handshake;
@@ -69,9 +69,13 @@ The system resolver may run `getaddrinfo` on a non-cancellable blocking thread. 
 async runtime and performs a non-waiting shutdown after emitting the completed report, so an
 abandoned resolver task cannot extend the process lifetime beyond the operation timeout.
 
+## Platform route backends
+
+Linux executes `ip -j route get <DESTINATION>` and parses iproute2 JSON for interface, gateway, and preferred source. Apple Silicon macOS executes `/sbin/route -n get -inet <DESTINATION>` or `/sbin/route -n get -inet6 <DESTINATION>` and parses the native text output for interface and gateway; that command does not expose a preferred source in the same form, so `source` remains absent. Both backends share the same shell-free execution, process-group termination, deadline, output cap, sanitization, and graceful-skip behavior.
+
 ## Process and container execution contexts
 
-Without an execution-context option, every probe uses NetWhy's current process context. `--pid <PID>` selects a process directly. `--docker <CONTAINER>` and `--podman <CONTAINER>` first use the corresponding runtime CLI to resolve a running container's init PID, then follow the same process-context path. The three selectors are mutually exclusive.
+Without an execution-context option, every probe uses NetWhy's current process context on Linux or macOS. On Linux, `--pid <PID>` selects a process directly. `--docker <CONTAINER>` and `--podman <CONTAINER>` first use the corresponding runtime CLI to resolve a running container's init PID, then follow the same process-context path. The three selectors are mutually exclusive. Apple Silicon macOS accepts the stable CLI grammar but rejects all three selectors with a structured `CONTEXT_UNAVAILABLE` error because Docker Desktop and Podman container PIDs belong to a Linux virtual machine and cannot be interpreted through the macOS host.
 
 Container selection fails closed for remote runtimes. Docker must resolve to a local `unix://` endpoint, whether selected by `DOCKER_HOST` or a Docker context, and Podman must report a non-remote service. Remote container PIDs cannot be interpreted against the local host's `/proc`. Runtime invocations do not use a shell, terminate option parsing before the user-provided container identifier, run in isolated process groups, cap each output stream at 64 KiB, and enforce `--timeout-ms` across process execution and output capture. After the target `/proc` handles have been pinned, NetWhy resolves the container PID again and rejects a concurrent restart.
 
@@ -144,7 +148,7 @@ Route-command failure alone cannot be the top-level cause if TCP succeeds.
 ## Privacy and security
 
 - The binary forbids unsafe Rust.
-- No shell is used to invoke iproute2, Docker, or Podman; arguments are passed directly to the executable. Helper processes run in isolated process groups, are terminated as a group at the deadline, and retain no more than 64 KiB per output stream.
+- No shell is used to invoke the Linux or macOS route utility, Docker, or Podman; arguments are passed directly to the executable. Helper processes run in isolated process groups, are terminated as a group at the deadline, and retain no more than 64 KiB per output stream.
 - Target input is parsed before it reaches an HTTP request.
 - Invalid target diagnostics escape terminal control characters before entering either output format.
 - Proxy credentials are redacted in memory before serialization.
@@ -161,7 +165,8 @@ Route-command failure alone cannot be the top-level cause if TCP succeeds.
 - Local TCP listeners for successful and refused transport behavior.
 - Local HTTP listeners for status parsing.
 - A local rustls server verifies trusted TLS and HTTPS behavior without a public dependency.
-- Route parsing tests use captured iproute2 JSON, not the test host's routing table.
+- Route parsing tests use captured iproute2 JSON and macOS `route` output, not the test host's routing table.
+- Native Apple Silicon CI verifies local diagnosis, the macOS route utility, structured rejection of Linux-only context selectors, release building, and package verification.
 - JSON reports are validated against `docs/report.schema.json` in CI.
 - Compiled-CLI tests cover validation, all output and exit-code contracts, address-family selection, HTTP/TLS outcomes, broken and unwritable stdout, and selected-process proxy redaction.
 - Capability-aware Linux fixtures verify real entry into isolated mount, root, and network contexts and the structured denial path when the target namespace belongs to an unavailable user context. They skip only when unprivileged user namespaces are disabled by the host.
