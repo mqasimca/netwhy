@@ -7,7 +7,7 @@ Linux and macOS already provide excellent low-level tools for DNS, routes, socke
 ```text
 $ netwhy https://api.example.com
 
-NetWhy 0.1.0
+NetWhy 0.2.0
 Result: FAIL
 Target: https://api.example.com:443
 Summary: TCP connects, but the TLS handshake fails.
