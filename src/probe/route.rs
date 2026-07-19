@@ -13,6 +13,7 @@ use nix::{
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
+#[cfg(any(target_os = "linux", test))]
 use serde_json::Value;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -403,6 +404,7 @@ fn is_no_route_error(error: &str) -> bool {
         || error.contains("not in table")
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_iproute2_route(address: SocketAddr, json: &[u8]) -> Result<RouteResult, String> {
     let routes: Vec<Value> =
         serde_json::from_slice(json).map_err(|error| format!("invalid iproute2 JSON: {error}"))?;
@@ -462,6 +464,7 @@ fn parse_macos_route(address: SocketAddr, output: &[u8]) -> Result<RouteResult, 
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn string_field(value: &Value, name: &str) -> Option<String> {
     value.get(name)?.as_str().map(sanitize_report_text)
 }

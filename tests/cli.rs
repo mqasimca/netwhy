@@ -159,6 +159,7 @@ fn assert_report_schema(value: &Value) {
     assert!(errors.is_empty(), "schema errors: {errors:#?}");
 }
 
+#[cfg(target_os = "linux")]
 fn assert_report_schema_rejects(value: &Value) {
     let schema: Value = serde_json::from_str(include_str!("../docs/report.schema.json")).unwrap();
     let validator = jsonschema::validator_for(&schema).unwrap();
@@ -928,7 +929,8 @@ fn output_error_retryability_is_enforced_by_the_schema() {
 
 #[test]
 fn refused_connection_exits_one() {
-    let (_reservation, address) = reserved_refused_address();
+    let (reservation, address) = reserved_refused_address();
+    drop(reservation);
 
     let output = netwhy(&[&address.to_string(), "--timeout-ms", "250"]);
 

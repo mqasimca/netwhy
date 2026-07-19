@@ -73,7 +73,8 @@ async fn raw_tcp_listener_passes() {
 
 #[tokio::test]
 async fn refused_port_is_explained() {
-    let (_reservation, address) = reserved_refused_address();
+    let (reservation, address) = reserved_refused_address();
+    drop(reservation);
 
     let report = diagnose(&cli_for(&address.to_string())).await.unwrap();
 
