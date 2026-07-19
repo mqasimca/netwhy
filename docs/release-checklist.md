@@ -30,6 +30,7 @@ For focused development, use `make test-unit`, `make test-integration`, or `make
 - [x] Proxy credentials are redacted before reaching report serialization.
 - [x] Proxy redaction handles `@` in paths, queries, and fragments.
 - [x] Target URL credentials are rejected and target query/fragment values are redacted in reports.
+- [x] Invalid target errors escape terminal control characters in human and JSON output.
 - [x] IPv4, IPv6, URL, hostname, and host-port target forms are parsed.
 - [x] Port zero and unsupported schemes are rejected.
 
@@ -56,9 +57,12 @@ For focused development, use `make test-unit`, `make test-integration`, or `make
 
 The following remain later-version work and do not block v0.1:
 
-- process and container network namespaces;
+- v0.2 release qualification for `--pid` across supported Linux environments;
+- v0.2 Docker and Podman context adapters (implemented in the development tree but outside this v0.1 boundary);
 - proxy-transport probing;
 - nftables verdict tracing;
 - active MTU diagnosis;
 - report comparison;
 - distribution-specific packages and public release automation.
+
+The current development tree includes `--pid`, local Docker and Podman adapters, same-context subprocess coverage, real isolated mount/network/root entry, and the cross-user-namespace denial path. This historical v0.1 checklist does not promote that work into the v0.1 acceptance boundary. See the [v0.2 release checklist](v0.2-release-checklist.md) for the active boundary.

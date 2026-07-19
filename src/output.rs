@@ -1,7 +1,10 @@
 use std::fmt::Write as _;
 
 use crate::{
-    model::{AddressFamilySelection, DiagnosticReport, Status},
+    model::{
+        AddressFamilySelection, CapabilityStatus, ContextRelation, DiagnosticReport,
+        ExecutionContextInfo, ExecutionContextSource, ProxyEnvironmentStatus, Status,
+    },
     sanitize_report_text,
 };
 
@@ -54,6 +57,7 @@ pub fn render_human(report: &DiagnosticReport) -> String {
         report.request.application_transport,
         report.request.proxy_mode
     );
+    write_execution_context(&mut output, report);
     for proxy in &report.proxies {
         let _ = writeln!(
             output,
@@ -68,6 +72,70 @@ pub fn render_human(report: &DiagnosticReport) -> String {
 
     let _ = writeln!(output, "\nCompleted in {} ms", report.duration_ms);
     output
+}
+
+fn write_execution_context(output: &mut String, report: &DiagnosticReport) {
+    let context = &report.request.execution_context;
+    let _ = write!(output, "  Execution context: ");
+    match context.source {
+        ExecutionContextSource::CurrentProcess => {
+            let _ = write!(output, "current process");
+        }
+        ExecutionContextSource::Process => {
+            let _ = write!(output, "process");
+            if let Some(pid) = context.target_pid {
+                let _ = write!(output, " {pid}");
+            }
+        }
+        ExecutionContextSource::Docker => write_container_context(output, context, "Docker"),
+        ExecutionContextSource::Podman => write_container_context(output, context, "Podman"),
+    }
+    let _ = write!(
+        output,
+        " · network {} · mount {} · root {} · proxy environment {}",
+        context_relation_name(context.network_namespace),
+        context_relation_name(context.mount_namespace),
+        context_relation_name(context.filesystem_root),
+        proxy_environment_name(context.proxy_environment)
+    );
+    match context.capability_status {
+        CapabilityStatus::NotRequired => {
+            let _ = writeln!(output, " · capabilities not required");
+        }
+        CapabilityStatus::Available => {
+            let _ = writeln!(
+                output,
+                " · capabilities available ({})",
+                context.required_capabilities.join(", ")
+            );
+        }
+    }
+}
+
+fn write_container_context(output: &mut String, context: &ExecutionContextInfo, runtime: &str) {
+    let _ = write!(output, "{runtime} container");
+    if let Some(container) = &context.target_container {
+        let _ = write!(output, " {}", sanitize_report_text(container));
+    }
+    if let Some(pid) = context.target_pid {
+        let _ = write!(output, " (process {pid})");
+    }
+}
+
+const fn context_relation_name(relation: ContextRelation) -> &'static str {
+    match relation {
+        ContextRelation::Current => "current",
+        ContextRelation::Shared => "shared",
+        ContextRelation::Entered => "entered",
+    }
+}
+
+const fn proxy_environment_name(status: ProxyEnvironmentStatus) -> &'static str {
+    match status {
+        ProxyEnvironmentStatus::CurrentProcess => "current process",
+        ProxyEnvironmentStatus::SelectedProcess => "selected process",
+        ProxyEnvironmentStatus::Unavailable => "unavailable",
+    }
 }
 
 fn write_dns(output: &mut String, report: &DiagnosticReport) {
@@ -229,8 +297,10 @@ mod tests {
     use super::render_human;
     use crate::model::{
         AddressFamily, AddressFamilySelection, ApplicationConnectResult, ApplicationReport,
-        Diagnosis, DiagnosisCode, DiagnosticReport, DnsResult, HttpResult, ProxyVariable,
-        RequestInfo, RouteResult, Status, TargetReport, TcpResult, TlsResult, ToolInfo,
+        CapabilityStatus, ContextRelation, Diagnosis, DiagnosisCode, DiagnosticReport, DnsResult,
+        ExecutionContextInfo, ExecutionContextSource, HttpResult, ProxyEnvironmentStatus,
+        ProxyVariable, RequestInfo, RouteResult, Status, TargetReport, TcpResult, TlsResult,
+        ToolInfo,
     };
 
     #[test]
@@ -252,7 +322,52 @@ mod tests {
         assert!(output.contains("TLSv1_3 · TLS_AES_256_GCM_SHA384"));
         assert!(output.contains("[WARN] HTTP"));
         assert!(output.contains("Proxy environment: HTTPS_PROXY=http://proxy.test:8080"));
+        assert!(output.contains(
+            "Execution context: current process · network current · mount current · root current · proxy environment current process · capabilities not required"
+        ));
         assert!(output.contains("Tunnel route selected."));
+    }
+
+    #[test]
+    fn renders_selected_process_context_and_capabilities() {
+        let mut report = rich_report();
+        report.request.execution_context = ExecutionContextInfo {
+            source: ExecutionContextSource::Process,
+            target_pid: Some(42),
+            target_container: None,
+            network_namespace: ContextRelation::Entered,
+            mount_namespace: ContextRelation::Shared,
+            filesystem_root: ContextRelation::Entered,
+            proxy_environment: ProxyEnvironmentStatus::SelectedProcess,
+            proxy_error: None,
+            required_capabilities: vec!["CAP_SYS_ADMIN".to_owned(), "CAP_SYS_CHROOT".to_owned()],
+            capability_status: CapabilityStatus::Available,
+        };
+
+        let output = render_human(&report);
+
+        assert!(output.contains(
+            "Execution context: process 42 · network entered · mount shared · root entered · proxy environment selected process · capabilities available (CAP_SYS_ADMIN, CAP_SYS_CHROOT)"
+        ));
+    }
+
+    #[test]
+    fn renders_docker_and_podman_contexts() {
+        for (source, runtime) in [
+            (ExecutionContextSource::Docker, "Docker"),
+            (ExecutionContextSource::Podman, "Podman"),
+        ] {
+            let mut report = rich_report();
+            report.request.execution_context.source = source;
+            report.request.execution_context.target_pid = Some(42);
+            report.request.execution_context.target_container = Some("web\ncontainer".to_owned());
+
+            let output = render_human(&report);
+
+            assert!(output.contains(&format!(
+                "Execution context: {runtime} container web\\ncontainer (process 42)"
+            )));
+        }
     }
 
     #[test]
@@ -308,6 +423,38 @@ mod tests {
         assert!(!output.contains('\u{1b}'));
         assert!(output.contains("\\u{1b}[2J"));
         assert!(output.contains("proxy.test/\\nforged"));
+    }
+
+    #[test]
+    fn renders_unavailable_context_and_fallback_evidence() {
+        let mut report = rich_report();
+        report.target.host = "example.com".to_owned();
+        report.request.execution_context.proxy_environment = ProxyEnvironmentStatus::Unavailable;
+        report.routes[0].interface = None;
+        report.routes[0].gateway = None;
+        report.routes[0].source = None;
+        report.routes[0].error = Some("permission denied".to_owned());
+        let http = report.application_attempts[0].http.as_mut().unwrap();
+        http.status_line = None;
+        http.error = None;
+
+        let output = render_human(&report);
+
+        assert!(output.contains("Interpreted as: https://example.com:8443"));
+        assert!(output.contains("proxy environment unavailable"));
+        assert!(output.contains("error: permission denied"));
+        assert!(output.contains("no response"));
+    }
+
+    #[test]
+    fn renders_each_explicit_address_family_selection() {
+        let mut report = rich_report();
+
+        report.request.address_family = AddressFamilySelection::Ipv4;
+        assert!(render_human(&report).contains("address family IPv4"));
+
+        report.request.address_family = AddressFamilySelection::Ipv6;
+        assert!(render_human(&report).contains("address family IPv6"));
     }
 
     fn rich_report() -> DiagnosticReport {
@@ -416,6 +563,7 @@ mod tests {
             address_family: AddressFamilySelection::Any,
             application_transport: "direct".to_owned(),
             proxy_mode: "detect_only".to_owned(),
+            execution_context: ExecutionContextInfo::current(),
         }
     }
 

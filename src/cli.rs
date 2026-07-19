@@ -17,6 +17,32 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Diagnose from the network, mount, root, and proxy context of a Linux process
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u32).range(1..),
+        conflicts_with_all = ["docker", "podman"]
+    )]
+    pub pid: Option<u32>,
+
+    /// Diagnose from the context of a running Docker container
+    #[arg(
+        long,
+        value_name = "CONTAINER",
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        conflicts_with_all = ["pid", "podman"]
+    )]
+    pub docker: Option<String>,
+
+    /// Diagnose from the context of a running Podman container
+    #[arg(
+        long,
+        value_name = "CONTAINER",
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        conflicts_with_all = ["pid", "docker"]
+    )]
+    pub podman: Option<String>,
+
     /// Test IPv4 addresses only
     #[arg(long, conflicts_with = "ipv6")]
     pub ipv4: bool,
@@ -42,6 +68,9 @@ mod tests {
 
         assert_eq!(cli.target, "example.test");
         assert!(!cli.json);
+        assert_eq!(cli.pid, None);
+        assert_eq!(cli.docker, None);
+        assert_eq!(cli.podman, None);
         assert!(!cli.ipv4);
         assert!(!cli.ipv6);
         assert_eq!(cli.timeout_ms, 3_000);
@@ -64,6 +93,49 @@ mod tests {
         assert!(cli.ipv4);
         assert!(!cli.ipv6);
         assert_eq!(cli.timeout_ms, 750);
+    }
+
+    #[test]
+    fn parses_a_process_execution_context() {
+        let cli = Cli::try_parse_from(["netwhy", "--pid", "42", "example.test"]).unwrap();
+
+        assert_eq!(cli.pid, Some(42));
+    }
+
+    #[test]
+    fn parses_container_execution_contexts() {
+        let docker = Cli::try_parse_from(["netwhy", "--docker", "web", "example.test"]).unwrap();
+        let podman = Cli::try_parse_from(["netwhy", "--podman", "api", "example.test"]).unwrap();
+
+        assert_eq!(docker.docker.as_deref(), Some("web"));
+        assert_eq!(docker.podman, None);
+        assert_eq!(podman.podman.as_deref(), Some("api"));
+        assert_eq!(podman.docker, None);
+    }
+
+    #[test]
+    fn rejects_conflicting_execution_contexts() {
+        for args in [
+            ["netwhy", "--pid", "42", "--docker", "web", "example.test"],
+            [
+                "netwhy",
+                "--docker",
+                "web",
+                "--podman",
+                "api",
+                "example.test",
+            ],
+        ] {
+            let error = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn rejects_pid_zero() {
+        let error = Cli::try_parse_from(["netwhy", "--pid", "0", "example.test"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
     }
 
     #[test]

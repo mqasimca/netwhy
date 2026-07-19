@@ -1,4 +1,6 @@
-use crate::model::{AddressFamily, DiagnosisCode, DiagnosticReport, Status};
+use crate::model::{
+    AddressFamily, DiagnosisCode, DiagnosticReport, ProxyEnvironmentStatus, Status,
+};
 
 pub fn explain(report: &mut DiagnosticReport) {
     let mut suggestions = Vec::new();
@@ -77,6 +79,21 @@ pub fn explain(report: &mut DiagnosticReport) {
 
 fn context_notes(report: &DiagnosticReport) -> Vec<String> {
     let mut notes = Vec::new();
+    if report.request.execution_context.proxy_environment == ProxyEnvironmentStatus::Unavailable {
+        notes.push(
+            report
+                .request
+                .execution_context
+                .proxy_error
+                .as_ref()
+                .map_or_else(
+                    || "The selected process proxy environment was unavailable.".to_owned(),
+                    |error| {
+                        format!("The selected process proxy environment was unavailable: {error}")
+                    },
+                ),
+        );
+    }
     if !report.proxies.is_empty() {
         notes.push(
             "Proxy environment variables are set; this version tests the target directly and bypasses HTTP proxies."
@@ -209,54 +226,123 @@ fn diagnose_family_asymmetry(report: &mut DiagnosticReport, suggestions: &mut Ve
 
 fn diagnose_application_failure(report: &mut DiagnosticReport, suggestions: &mut Vec<String>) {
     report.overall = Status::Fail;
-    let (connect_failed, tls_failed, cause) = {
-        let application = selected_application(report).expect("checked by caller");
-        let connect_failed = application.connect.status == Status::Fail;
-        let tls_failed = application
-            .tls
-            .as_ref()
-            .is_some_and(|tls| tls.status == Status::Fail);
-        let cause = if connect_failed {
-            application.connect.error.clone()
-        } else if tls_failed {
-            application.tls.as_ref().and_then(|tls| tls.error.clone())
-        } else {
-            application
+    let failure = classify_application_failure(&report.application_attempts)
+        .expect("application attempts were checked by the caller");
+
+    match failure.stage {
+        ApplicationFailureStage::Connect => {
+            report.diagnosis.code = DiagnosisCode::ApplicationConnectFailed;
+            set_summary(
+                report,
+                "The initial TCP probe succeeded, but every application reconnect failed.",
+            );
+            suggestions.push(
+                "Check whether the service is intermittent, rate-limited, or closing connections between probes."
+                    .to_owned(),
+            );
+        }
+        ApplicationFailureStage::Tls => {
+            report.diagnosis.code = DiagnosisCode::TlsHandshakeFailed;
+            set_summary(report, "TCP connects, but the TLS handshake fails.");
+            suggestions.push(
+                "Check the certificate name, trust chain, system clock, SNI, and supported TLS versions."
+                    .to_owned(),
+            );
+        }
+        ApplicationFailureStage::Http => {
+            report.diagnosis.code = DiagnosisCode::HttpExchangeFailed;
+            set_summary(
+                report,
+                "The transport connects, but the HTTP exchange fails.",
+            );
+            suggestions
+                .push("Confirm that the port serves HTTP and accepts HEAD requests.".to_owned());
+        }
+    }
+    report.diagnosis.likely_cause = failure.cause;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApplicationFailureStage {
+    Connect,
+    Tls,
+    Http,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ApplicationFailure {
+    stage: ApplicationFailureStage,
+    cause: Option<String>,
+}
+
+/// Classifies all failed attempts by the deepest protocol layer any address reached.
+///
+/// This makes the diagnosis independent of resolver and connection-completion ordering. A
+/// reconnect failure is reported only when every attempt failed to reconnect; otherwise TLS or
+/// HTTP evidence from an address that progressed further takes precedence.
+fn classify_application_failure(
+    attempts: &[crate::model::ApplicationReport],
+) -> Option<ApplicationFailure> {
+    if attempts.is_empty()
+        || attempts
+            .iter()
+            .any(|attempt| attempt.status != Status::Fail)
+    {
+        return None;
+    }
+
+    if attempts
+        .iter()
+        .all(|attempt| attempt.connect.status == Status::Fail)
+    {
+        let cause = attempts
+            .iter()
+            .min_by_key(|attempt| attempt.address)
+            .and_then(|attempt| attempt.connect.error.clone());
+        return Some(ApplicationFailure {
+            stage: ApplicationFailureStage::Connect,
+            cause,
+        });
+    }
+
+    if let Some(http) = attempts
+        .iter()
+        .filter(|attempt| {
+            attempt
                 .http
                 .as_ref()
-                .and_then(|http| http.error.clone())
-        };
-        (connect_failed, tls_failed, cause)
-    };
-
-    if connect_failed {
-        report.diagnosis.code = DiagnosisCode::ApplicationConnectFailed;
-        set_summary(
-            report,
-            "The initial TCP probe succeeded, but every application reconnect failed.",
-        );
-        report.diagnosis.likely_cause = cause;
-        suggestions.push(
-            "Check whether the service is intermittent, rate-limited, or closing connections between probes."
-                .to_owned(),
-        );
-    } else if tls_failed {
-        report.diagnosis.code = DiagnosisCode::TlsHandshakeFailed;
-        set_summary(report, "TCP connects, but the TLS handshake fails.");
-        report.diagnosis.likely_cause = cause;
-        suggestions.push(
-            "Check the certificate name, trust chain, system clock, SNI, and supported TLS versions."
-                .to_owned(),
-        );
-    } else {
-        report.diagnosis.code = DiagnosisCode::HttpExchangeFailed;
-        set_summary(
-            report,
-            "The transport connects, but the HTTP exchange fails.",
-        );
-        report.diagnosis.likely_cause = cause;
-        suggestions.push("Confirm that the port serves HTTP and accepts HEAD requests.".to_owned());
+                .is_some_and(|http| http.status == Status::Fail)
+        })
+        .min_by_key(|attempt| attempt.address)
+        .and_then(|attempt| attempt.http.as_ref())
+    {
+        return Some(ApplicationFailure {
+            stage: ApplicationFailureStage::Http,
+            cause: http.error.clone(),
+        });
     }
+
+    if let Some(tls) = attempts
+        .iter()
+        .filter(|attempt| {
+            attempt
+                .tls
+                .as_ref()
+                .is_some_and(|tls| tls.status == Status::Fail)
+        })
+        .min_by_key(|attempt| attempt.address)
+        .and_then(|attempt| attempt.tls.as_ref())
+    {
+        return Some(ApplicationFailure {
+            stage: ApplicationFailureStage::Tls,
+            cause: tls.error.clone(),
+        });
+    }
+
+    Some(ApplicationFailure {
+        stage: ApplicationFailureStage::Http,
+        cause: None,
+    })
 }
 
 fn diagnose_http_error(report: &mut DiagnosticReport, suggestions: &mut Vec<String>) -> bool {
@@ -307,14 +393,6 @@ fn all_tcp_errors(report: &DiagnosticReport, kinds: &[&str]) -> bool {
         })
 }
 
-fn selected_application(report: &DiagnosticReport) -> Option<&crate::model::ApplicationReport> {
-    report
-        .application_attempts
-        .iter()
-        .find(|application| application.status != Status::Fail)
-        .or_else(|| report.application_attempts.first())
-}
-
 /// Returns `None` when the family was not resolved, otherwise whether any address connected.
 fn family_state(report: &DiagnosticReport, family: AddressFamily) -> Option<bool> {
     let family_results = report
@@ -339,11 +417,12 @@ fn is_tunnel(interface: &str) -> bool {
 mod tests {
     use std::net::SocketAddr;
 
-    use super::explain;
+    use super::{ApplicationFailureStage, classify_application_failure, context_notes, explain};
     use crate::model::{
         AddressFamily, AddressFamilySelection, ApplicationConnectResult, ApplicationReport,
-        Diagnosis, DiagnosisCode, DiagnosticReport, DnsResult, HttpResult, ProxyVariable,
-        RequestInfo, RouteResult, Status, TargetReport, TcpResult, ToolInfo,
+        Diagnosis, DiagnosisCode, DiagnosticReport, DnsResult, ExecutionContextInfo, HttpResult,
+        ProxyEnvironmentStatus, ProxyVariable, RequestInfo, RouteResult, Status, TargetReport,
+        TcpResult, TlsResult, ToolInfo,
     };
 
     #[test]
@@ -407,6 +486,37 @@ mod tests {
                 .is_some_and(|cause| cause.contains("no usable address"))
         );
         assert_eq!(report.diagnosis.notes.len(), 2);
+    }
+
+    #[test]
+    fn notes_an_unavailable_selected_process_environment_with_optional_detail() {
+        for error in [None, Some("permission denied".to_owned())] {
+            let address = "192.0.2.1:443".parse().unwrap();
+            let mut report = report_with_tcp(vec![passed_tcp(address, AddressFamily::Ipv4)]);
+            report.request.execution_context.proxy_environment =
+                ProxyEnvironmentStatus::Unavailable;
+            report.request.execution_context.proxy_error = error;
+
+            let notes = context_notes(&report);
+
+            assert_eq!(notes.len(), 1);
+            assert!(notes[0].contains("proxy environment was unavailable"));
+        }
+    }
+
+    #[test]
+    fn notes_when_dns_results_are_truncated() {
+        let address = "192.0.2.1:443".parse().unwrap();
+        let mut report = report_with_tcp(vec![passed_tcp(address, AddressFamily::Ipv4)]);
+        report.dns.truncated = true;
+
+        let notes = context_notes(&report);
+
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("capped at the first 32"))
+        );
     }
 
     #[test]
@@ -553,6 +663,102 @@ mod tests {
     }
 
     #[test]
+    fn classifies_mixed_application_failures_by_deepest_reached_layer() {
+        let connect_address = "192.0.2.1:443".parse().unwrap();
+        let tls_address = "192.0.2.2:443".parse().unwrap();
+        let http_address = "192.0.2.3:443".parse().unwrap();
+
+        for attempts in [
+            vec![
+                failed_application_connect(connect_address),
+                failed_tls(tls_address),
+            ],
+            vec![
+                failed_tls(tls_address),
+                failed_application_connect(connect_address),
+            ],
+        ] {
+            let failure = classify_application_failure(&attempts).unwrap();
+            assert_eq!(failure.stage, ApplicationFailureStage::Tls);
+            assert_eq!(failure.cause.as_deref(), Some("certificate rejected"));
+
+            let mut report = report_with_tcp(vec![
+                passed_tcp(connect_address, AddressFamily::Ipv4),
+                passed_tcp(tls_address, AddressFamily::Ipv4),
+            ]);
+            report.application_attempts = attempts;
+            explain(&mut report);
+            assert_eq!(report.diagnosis.code, DiagnosisCode::TlsHandshakeFailed);
+            assert_eq!(
+                report.diagnosis.likely_cause.as_deref(),
+                Some("certificate rejected")
+            );
+        }
+
+        for attempts in [
+            vec![
+                failed_application_connect(connect_address),
+                failed_tls(tls_address),
+                failed_http(http_address),
+            ],
+            vec![
+                failed_http(http_address),
+                failed_tls(tls_address),
+                failed_application_connect(connect_address),
+            ],
+        ] {
+            let failure = classify_application_failure(&attempts).unwrap();
+            assert_eq!(failure.stage, ApplicationFailureStage::Http);
+            assert_eq!(failure.cause.as_deref(), Some("invalid HTTP response"));
+
+            let mut report = report_with_tcp(vec![
+                passed_tcp(connect_address, AddressFamily::Ipv4),
+                passed_tcp(tls_address, AddressFamily::Ipv4),
+                passed_tcp(http_address, AddressFamily::Ipv4),
+            ]);
+            report.application_attempts = attempts;
+            explain(&mut report);
+            assert_eq!(report.diagnosis.code, DiagnosisCode::HttpExchangeFailed);
+            assert_eq!(
+                report.diagnosis.likely_cause.as_deref(),
+                Some("invalid HTTP response")
+            );
+        }
+    }
+
+    #[test]
+    fn application_failure_classification_rejects_non_failure_sets() {
+        assert_eq!(classify_application_failure(&[]), None);
+
+        let address = "192.0.2.1:443".parse().unwrap();
+        let mut reachable = failed_http(address);
+        reachable.status = Status::Pass;
+        assert_eq!(classify_application_failure(&[reachable]), None);
+    }
+
+    #[test]
+    fn application_failure_classification_handles_missing_stage_details() {
+        let address = "192.0.2.1:443".parse().unwrap();
+        let failure = classify_application_failure(&[ApplicationReport {
+            status: Status::Fail,
+            protocol: "https".to_owned(),
+            address,
+            connect: ApplicationConnectResult {
+                status: Status::Pass,
+                duration_ms: 1,
+                error_kind: None,
+                error: None,
+            },
+            tls: None,
+            http: None,
+        }])
+        .unwrap();
+
+        assert_eq!(failure.stage, ApplicationFailureStage::Http);
+        assert_eq!(failure.cause, None);
+    }
+
+    #[test]
     fn warns_when_application_succeeds_after_an_address_failure() {
         let first = "192.0.2.1:80".parse().unwrap();
         let second = "192.0.2.2:80".parse().unwrap();
@@ -630,6 +836,7 @@ mod tests {
                 address_family: AddressFamilySelection::Any,
                 application_transport: "direct".to_owned(),
                 proxy_mode: "detect_only".to_owned(),
+                execution_context: ExecutionContextInfo::current(),
             },
             target: TargetReport {
                 original: "example.test".to_owned(),
@@ -679,6 +886,74 @@ mod tests {
             duration_ms: 1,
             error_kind: None,
             error: None,
+        }
+    }
+
+    fn failed_application_connect(address: SocketAddr) -> ApplicationReport {
+        ApplicationReport {
+            status: Status::Fail,
+            protocol: "https".to_owned(),
+            address,
+            connect: ApplicationConnectResult {
+                status: Status::Fail,
+                duration_ms: 1,
+                error_kind: Some("connection_refused".to_owned()),
+                error: Some("connection refused".to_owned()),
+            },
+            tls: None,
+            http: None,
+        }
+    }
+
+    fn failed_tls(address: SocketAddr) -> ApplicationReport {
+        ApplicationReport {
+            status: Status::Fail,
+            protocol: "https".to_owned(),
+            address,
+            connect: ApplicationConnectResult {
+                status: Status::Pass,
+                duration_ms: 1,
+                error_kind: None,
+                error: None,
+            },
+            tls: Some(TlsResult {
+                status: Status::Fail,
+                handshake_ms: 1,
+                trust_source: "test_roots".to_owned(),
+                version: None,
+                cipher_suite: None,
+                error: Some("certificate rejected".to_owned()),
+            }),
+            http: None,
+        }
+    }
+
+    fn failed_http(address: SocketAddr) -> ApplicationReport {
+        ApplicationReport {
+            status: Status::Fail,
+            protocol: "https".to_owned(),
+            address,
+            connect: ApplicationConnectResult {
+                status: Status::Pass,
+                duration_ms: 1,
+                error_kind: None,
+                error: None,
+            },
+            tls: Some(TlsResult {
+                status: Status::Pass,
+                handshake_ms: 1,
+                trust_source: "test_roots".to_owned(),
+                version: Some("TLSv1_3".to_owned()),
+                cipher_suite: Some("TLS13_AES_256_GCM_SHA384".to_owned()),
+                error: None,
+            }),
+            http: Some(HttpResult {
+                status: Status::Fail,
+                duration_ms: 1,
+                status_code: None,
+                status_line: None,
+                error: Some("invalid HTTP response".to_owned()),
+            }),
         }
     }
 }

@@ -63,6 +63,74 @@ pub struct RequestInfo {
     pub address_family: AddressFamilySelection,
     pub application_transport: String,
     pub proxy_mode: String,
+    pub execution_context: ExecutionContextInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionContextInfo {
+    pub source: ExecutionContextSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_container: Option<String>,
+    pub network_namespace: ContextRelation,
+    pub mount_namespace: ContextRelation,
+    pub filesystem_root: ContextRelation,
+    pub proxy_environment: ProxyEnvironmentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_error: Option<String>,
+    pub required_capabilities: Vec<String>,
+    pub capability_status: CapabilityStatus,
+}
+
+impl ExecutionContextInfo {
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            source: ExecutionContextSource::CurrentProcess,
+            target_pid: None,
+            target_container: None,
+            network_namespace: ContextRelation::Current,
+            mount_namespace: ContextRelation::Current,
+            filesystem_root: ContextRelation::Current,
+            proxy_environment: ProxyEnvironmentStatus::CurrentProcess,
+            proxy_error: None,
+            required_capabilities: Vec::new(),
+            capability_status: CapabilityStatus::NotRequired,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionContextSource {
+    CurrentProcess,
+    Process,
+    Docker,
+    Podman,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRelation {
+    Current,
+    Shared,
+    Entered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyEnvironmentStatus {
+    CurrentProcess,
+    SelectedProcess,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityStatus {
+    NotRequired,
+    Available,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -249,6 +317,7 @@ impl Default for Diagnosis {
 pub enum ErrorCode {
     InvalidInvocation,
     InvalidTarget,
+    ContextUnavailable,
     OutputError,
 }
 
@@ -292,7 +361,7 @@ impl ErrorReport {
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorCode, ErrorReport};
+    use super::{AddressFamily, ErrorCode, ErrorReport};
 
     #[test]
     fn only_output_errors_are_retryable() {
@@ -306,5 +375,19 @@ mod tests {
                 .error
                 .retryable
         );
+        assert!(
+            !ErrorReport::new(ErrorCode::ContextUnavailable, "bad context", "fix it")
+                .error
+                .retryable
+        );
+    }
+
+    #[test]
+    fn derives_address_family_from_socket_address() {
+        let ipv4 = "192.0.2.1:443".parse().unwrap();
+        let ipv6 = "[2001:db8::1]:443".parse().unwrap();
+
+        assert_eq!(AddressFamily::from(&ipv4), AddressFamily::Ipv4);
+        assert_eq!(AddressFamily::from(&ipv6), AddressFamily::Ipv6);
     }
 }

@@ -97,10 +97,14 @@ The wording must distinguish evidence from inference. For example, a timeout sup
 
 ### v0.2 — Execution-context fidelity
 
-- `--pid <PID>` to diagnose inside a process's network and mount namespaces.
-- Docker and Podman target adapters.
-- Resolver and proxy environment captured from the selected process.
-- Explicit privilege and capability reporting.
+- [x] `--pid <PID>` to diagnose inside a process's network and mount namespaces and filesystem root.
+- [x] Local Docker and Podman target adapters with remote-runtime rejection and restart detection.
+- [x] Resolver and proxy environment captured from the selected process.
+- [x] Explicit privilege and capability reporting.
+- [x] Capability-aware isolated mount/network namespace integration fixtures.
+- [ ] Release qualification across supported Linux environments.
+
+The checked items are implemented in the current development tree. They are not a published v0.2 release; the remaining gate is real-runtime qualification across the supported Linux environments in the [v0.2 release checklist](v0.2-release-checklist.md).
 
 ### v0.3 — Deeper Linux path evidence
 

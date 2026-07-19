@@ -127,14 +127,123 @@
         "timeout_ms",
         "address_family",
         "application_transport",
-        "proxy_mode"
+        "proxy_mode",
+        "execution_context"
       ],
       "properties": {
         "timeout_ms": { "type": "integer", "minimum": 1 },
         "address_family": { "type": "string", "enum": ["any", "ipv4", "ipv6"] },
         "application_transport": { "const": "direct" },
-        "proxy_mode": { "const": "detect_only" }
+        "proxy_mode": { "const": "detect_only" },
+        "execution_context": { "$ref": "#/$defs/execution_context" }
       }
+    },
+    "execution_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "network_namespace",
+        "mount_namespace",
+        "filesystem_root",
+        "proxy_environment",
+        "required_capabilities",
+        "capability_status"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["current_process", "process", "docker", "podman"]
+        },
+        "target_pid": { "type": "integer", "minimum": 1 },
+        "target_container": { "type": "string", "minLength": 1 },
+        "network_namespace": {
+          "type": "string",
+          "enum": ["current", "shared", "entered"]
+        },
+        "mount_namespace": {
+          "type": "string",
+          "enum": ["current", "shared", "entered"]
+        },
+        "filesystem_root": {
+          "type": "string",
+          "enum": ["current", "shared", "entered"]
+        },
+        "proxy_environment": {
+          "type": "string",
+          "enum": ["current_process", "selected_process", "unavailable"]
+        },
+        "proxy_error": { "type": "string", "minLength": 1 },
+        "required_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["CAP_SYS_ADMIN", "CAP_SYS_CHROOT"]
+          },
+          "uniqueItems": true
+        },
+        "capability_status": {
+          "type": "string",
+          "enum": ["not_required", "available"]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "const": "current_process" } } },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["target_pid"] },
+                { "required": ["target_container"] }
+              ]
+            },
+            "properties": {
+              "network_namespace": { "const": "current" },
+              "mount_namespace": { "const": "current" },
+              "filesystem_root": { "const": "current" },
+              "proxy_environment": { "const": "current_process" },
+              "required_capabilities": { "maxItems": 0 },
+              "capability_status": { "const": "not_required" }
+            }
+          },
+          "else": {
+            "required": ["target_pid"],
+            "properties": {
+              "network_namespace": { "enum": ["shared", "entered"] },
+              "mount_namespace": { "enum": ["shared", "entered"] },
+              "filesystem_root": { "enum": ["shared", "entered"] },
+              "proxy_environment": { "enum": ["selected_process", "unavailable"] }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "source": { "enum": ["docker", "podman"] }
+            }
+          },
+          "then": { "required": ["target_container"] },
+          "else": { "not": { "required": ["target_container"] } }
+        },
+        {
+          "if": {
+            "properties": { "proxy_environment": { "const": "unavailable" } }
+          },
+          "then": { "required": ["proxy_error"] },
+          "else": { "not": { "required": ["proxy_error"] } }
+        },
+        {
+          "if": {
+            "properties": { "capability_status": { "const": "not_required" } }
+          },
+          "then": {
+            "properties": { "required_capabilities": { "maxItems": 0 } }
+          },
+          "else": {
+            "properties": { "required_capabilities": { "minItems": 1 } }
+          }
+        }
+      ]
     },
     "target": {
       "type": "object",

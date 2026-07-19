@@ -47,7 +47,7 @@ The first release diagnoses a target from the current Linux network namespace:
 6. Explain the most likely failure and suggest focused follow-up checks.
 7. Produce outcome-first human output or a versioned, coded JSON report.
 
-Container namespaces, firewall verdict tracing, MTU diagnosis, proxy execution, and report comparison are deliberately deferred. See [the product roadmap](docs/product.md).
+The current development tree implements the v0.2 execution-context features: process selection via `--pid` and local Docker or Podman container selection via `--docker` and `--podman`. Cross-environment release qualification remains before v0.2 can be published. Firewall verdict tracing, MTU diagnosis, proxy execution, and report comparison remain deferred. See [the product roadmap](docs/product.md).
 
 ## Command contract
 
@@ -59,6 +59,9 @@ Arguments:
 
 Options:
       --json                 Emit a versioned JSON report
+      --pid <PID>            Diagnose from the network, mount, root, and proxy context of a Linux process
+      --docker <CONTAINER>   Diagnose from a running container managed by a local Docker runtime
+      --podman <CONTAINER>   Diagnose from a running container managed by a local Podman runtime
       --ipv4                 Test IPv4 addresses only
       --ipv6                 Test IPv6 addresses only
       --timeout-ms <MILLIS>  Per-operation DNS, route, TCP, TLS, and HTTP timeout [default: 3000]
@@ -83,17 +86,27 @@ Exit codes:
 | --- | --- |
 | `0` | The target is reachable. Warnings such as partial IPv6 failure or an HTTP error status may still be present. |
 | `1` | Connectivity or the requested application protocol failed. |
-| `2` | The invocation was invalid or NetWhy itself could not produce a report. |
+| `2` | The invocation or selected execution context was invalid, or NetWhy itself could not produce a report. |
 
 ## Safety and network behavior
 
 NetWhy does not mutate local configuration. It does perform active DNS, TCP, TLS, and optional HTTP `HEAD` probes, so it is not a passive observer.
 
-The v0.1 application probe connects directly. Proxy-related environment variables are reported with credentials redacted, but are not used to transport the probe. This distinction is displayed in both human and JSON output.
+The application probe connects directly. Proxy-related environment variables are reported with credentials redacted, but are not used to transport the probe. This distinction is displayed in both human and JSON output.
 
-Route inspection uses `ip -j route get` when iproute2 is available. If it is missing, NetWhy skips that evidence and continues with real TCP attempts.
+`--pid <PID>` selects another Linux process as the execution context. NetWhy opens the target context before changing its own process, enters a differing mount namespace and filesystem root before a differing network namespace, and only then creates the async runtime. Shared namespaces and roots require no capabilities. Entering a differing namespace requires `CAP_SYS_ADMIN`; entering a differing root requires `CAP_SYS_CHROOT`. NetWhy never attaches to or mutates the selected process. If its proxy environment cannot be read, the report records that limitation and continues with the selected resolver and network context.
 
-Reports reject target URL credentials, redact target query strings and fragments, and record the effective timeout, address-family selection, application transport, and TLS trust source. DNS evidence is capped at 32 unique addresses to keep resource use predictable.
+`--docker <CONTAINER>` and `--podman <CONTAINER>` resolve a running container to its init PID through the corresponding CLI, then use the same pinned process-context path. These options are mutually exclusive with each other and with `--pid`. NetWhy accepts only a demonstrably local Unix-socket Docker context or a non-remote Podman service: a PID reported by a remote runtime belongs to another host and is unsafe to interpret through local `/proc`. Runtime commands are shell-free, time-bounded, and output-bounded. The container PID is checked again after its `/proc` context has been pinned so a concurrent restart fails cleanly instead of mixing contexts.
+
+Rootless Podman owns its container namespaces from Podman's user namespace. Run NetWhy through `podman unshare` so it has the namespace-local capabilities needed to enter an isolated rootless container:
+
+```bash
+podman unshare netwhy --podman my-container https://example.com
+```
+
+Route inspection uses `ip -j route get` when iproute2 is available. Each helper invocation is time-bounded, runs in an isolated process group, and retains at most 64 KiB from each output stream. If iproute2 is missing, NetWhy skips that evidence and continues with real TCP attempts.
+
+Reports reject target URL credentials, redact target query strings and fragments, and record the effective timeout, address-family selection, application transport, execution context, required capabilities, and TLS trust source. DNS evidence is capped at 32 unique addresses to keep resource use predictable.
 
 ## Documentation
 
@@ -111,7 +124,7 @@ NetWhy requires Rust 1.85 or newer. Stable Rust is recommended.
 cargo build
 make test-unit        # library, binary, and CLI parser unit tests
 make test-integration # in-process DNS/TCP/TLS/HTTP pipeline tests
-make test-cli         # compiled netwhy process, output, schema, and exit-code tests
+make test-cli         # compiled CLI, schema, exit-code, and process-context tests
 make test             # the complete automated Rust test suite
 ```
 
@@ -144,6 +157,9 @@ Live smoke tests remain optional because they depend on the current network:
 ```bash
 cargo run -- https://example.com
 cargo run -- --json does-not-exist.invalid
+cargo run -- --json --pid "$PID" https://example.com
+cargo run -- --json --docker my-container https://example.com
+cargo run -- --json --podman my-container https://example.com
 ```
 
 ## Local installation and packaging
@@ -173,7 +189,7 @@ Build a local Cargo package without requiring a commit:
 make package
 ```
 
-See the [v0.1 release checklist](docs/release-checklist.md) for the exact verification contract.
+See the historical [v0.1 release checklist](docs/release-checklist.md) and the current [v0.2 release checklist](docs/v0.2-release-checklist.md) for the exact verification contracts.
 
 ## License
 

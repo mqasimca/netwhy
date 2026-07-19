@@ -10,23 +10,51 @@ use crate::{
 const MAX_CONCURRENT_CONNECTS: usize = 8;
 
 pub async fn connect_all(addresses: &[SocketAddr], operation_timeout: Duration) -> Vec<TcpResult> {
+    connect_all_with(addresses, operation_timeout, connect_one).await
+}
+
+async fn connect_all_with<I, F>(
+    addresses: &[SocketAddr],
+    operation_timeout: Duration,
+    connect: I,
+) -> Vec<TcpResult>
+where
+    I: Fn(SocketAddr, Duration) -> F + Copy + Send + 'static,
+    F: Future<Output = TcpResult> + Send + 'static,
+{
     let mut tasks = JoinSet::new();
     let mut pending = addresses.iter().copied().enumerate();
     for (index, address) in pending.by_ref().take(MAX_CONCURRENT_CONNECTS) {
-        tasks.spawn(async move { (index, connect_one(address, operation_timeout).await) });
+        tasks.spawn(async move { (index, connect(address, operation_timeout).await) });
     }
 
-    let mut results = Vec::with_capacity(addresses.len());
+    let mut results = std::iter::repeat_with(|| None)
+        .take(addresses.len())
+        .collect::<Vec<_>>();
     while let Some(result) = tasks.join_next().await {
-        if let Ok(result) = result {
-            results.push(result);
+        if let Ok((index, result)) = result {
+            results[index] = Some(result);
         }
         if let Some((index, address)) = pending.next() {
-            tasks.spawn(async move { (index, connect_one(address, operation_timeout).await) });
+            tasks.spawn(async move { (index, connect(address, operation_timeout).await) });
         }
     }
-    results.sort_by_key(|(index, _)| *index);
-    results.into_iter().map(|(_, result)| result).collect()
+    results
+        .into_iter()
+        .zip(addresses.iter().copied())
+        .map(|(result, address)| result.unwrap_or_else(|| failed_task(address)))
+        .collect()
+}
+
+fn failed_task(address: SocketAddr) -> TcpResult {
+    TcpResult {
+        status: Status::Fail,
+        address,
+        family: AddressFamily::from(&address),
+        duration_ms: 0,
+        error_kind: Some("other".to_owned()),
+        error: Some("TCP probe task stopped before producing evidence".to_owned()),
+    }
 }
 
 async fn connect_one(address: SocketAddr, operation_timeout: Duration) -> TcpResult {
@@ -95,8 +123,8 @@ mod tests {
 
     use tokio::net::TcpListener;
 
-    use super::{connect_all, connect_with, error_kind};
-    use crate::model::Status;
+    use super::{connect_all, connect_all_with, connect_with, error_kind};
+    use crate::model::{AddressFamily, Status, TcpResult};
 
     #[tokio::test]
     async fn reports_a_listening_socket() {
@@ -107,6 +135,56 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status, Status::Pass);
+    }
+
+    #[tokio::test]
+    async fn bounds_concurrency_without_dropping_or_reordering_addresses() {
+        let mut listeners = Vec::new();
+        let mut addresses = Vec::new();
+        for _ in 0..=super::MAX_CONCURRENT_CONNECTS {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            addresses.push(listener.local_addr().unwrap());
+            listeners.push(listener);
+        }
+
+        let results = connect_all(&addresses, Duration::from_secs(1)).await;
+
+        assert_eq!(results.len(), addresses.len());
+        assert!(results.iter().all(|result| result.status == Status::Pass));
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.address)
+                .collect::<Vec<_>>(),
+            addresses
+        );
+    }
+
+    #[tokio::test]
+    async fn converts_a_panicked_tcp_task_into_explicit_evidence() {
+        async fn synthetic_connect(address: std::net::SocketAddr, _timeout: Duration) -> TcpResult {
+            assert_ne!(address.port(), 2, "simulated TCP task panic");
+            TcpResult {
+                status: Status::Pass,
+                address,
+                family: AddressFamily::from(&address),
+                duration_ms: 0,
+                error_kind: None,
+                error: None,
+            }
+        }
+
+        let addresses = [
+            "192.0.2.1:1".parse().unwrap(),
+            "192.0.2.1:2".parse().unwrap(),
+        ];
+
+        let results = connect_all_with(&addresses, Duration::from_secs(1), synthetic_connect).await;
+
+        assert_eq!(results.len(), addresses.len());
+        assert_eq!(results[0].status, Status::Pass);
+        assert_eq!(results[1].status, Status::Fail);
+        assert_eq!(results[1].error_kind.as_deref(), Some("other"));
     }
 
     #[test]

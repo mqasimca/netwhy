@@ -5,6 +5,9 @@
 NetWhy is organized as a pipeline with a separate inference layer:
 
 ```text
+current process, --pid, --docker, or --podman context
+    │
+    ▼
 target parser
     │
     ▼
@@ -29,6 +32,8 @@ Probe modules collect facts and do not decide the final cause. The diagnosis mod
 
 | Module | Responsibility |
 | --- | --- |
+| `container_context` | Reject remote runtimes, resolve a local Docker or Podman container to its init PID, and bound runtime command time and output. |
+| `process_context` | Inspect a selected PID, enter differing Linux mount/network namespaces and root before runtime startup, and capture only supported proxy variables. |
 | `target` | Parse supported input forms into a normalized scheme, host, port, and optional URL. |
 | `probe::dns` | Resolve with the process's system resolver and apply the requested address-family filter. |
 | `probe::route` | Run `ip -j route get` for each destination and extract interface, gateway, and preferred source. |
@@ -56,8 +61,33 @@ Probe modules collect facts and do not decide the final cause. The diagnosis mod
 - the application probe's fresh TCP connection;
 - the TLS handshake;
 - the HTTP request/first response line exchange.
+- each Docker or Podman locality check and container inspection.
 
 DNS uses the system resolver, bounded by the requested operation timeout. Resolver-internal behavior remains platform dependent.
+
+The system resolver may run `getaddrinfo` on a non-cancellable blocking thread. The CLI owns its
+async runtime and performs a non-waiting shutdown after emitting the completed report, so an
+abandoned resolver task cannot extend the process lifetime beyond the operation timeout.
+
+## Process and container execution contexts
+
+Without an execution-context option, every probe uses NetWhy's current process context. `--pid <PID>` selects a process directly. `--docker <CONTAINER>` and `--podman <CONTAINER>` first use the corresponding runtime CLI to resolve a running container's init PID, then follow the same process-context path. The three selectors are mutually exclusive.
+
+Container selection fails closed for remote runtimes. Docker must resolve to a local `unix://` endpoint, whether selected by `DOCKER_HOST` or a Docker context, and Podman must report a non-remote service. Remote container PIDs cannot be interpreted against the local host's `/proc`. Runtime invocations do not use a shell, terminate option parsing before the user-provided container identifier, run in isolated process groups, cap each output stream at 64 KiB, and enforce `--timeout-ms` across process execution and output capture. After the target `/proc` handles have been pinned, NetWhy resolves the container PID again and rejects a concurrent restart.
+
+An isolated rootless Podman container's namespaces are owned from Podman's user namespace. `podman unshare netwhy --podman <CONTAINER> <TARGET>` launches NetWhy with the matching subordinate UID/GID mappings and namespace-local capabilities. A direct invocation outside that user namespace fails safely with `CONTEXT_UNAVAILABLE` when the kernel rejects `setns`.
+
+For every selected PID, startup remains single-threaded while NetWhy:
+
+1. pins the current and selected `/proc` process directories, then opens file descriptors for both network namespaces, mount namespaces, and filesystem roots relative to those directories;
+2. compares namespace and root device/inode identities so shared contexts do not require privileged operations;
+3. reads `/proc/<PID>/environ` and immediately retains only recognized proxy variables;
+4. enters a differing mount namespace, changes to the selected root, and then enters a differing network namespace;
+5. creates the Tokio runtime only after all one-way context changes succeed.
+
+Pinning the selected process directory prevents PID exit/reuse from mixing descriptors from different process incarnations. All context descriptors are opened before the first context change, so later path resolution cannot accidentally switch back to the caller's mount tree. The root transition uses `fchdir`, `chroot`, and `chdir("/")` to avoid retaining a working-directory escape. A differing mount or network namespace requires `CAP_SYS_ADMIN`; a differing root requires `CAP_SYS_CHROOT`. Missing PIDs, inaccessible namespace descriptors, and failed context changes produce the structured `CONTEXT_UNAVAILABLE` invocation error. An unreadable proxy environment is non-fatal and is recorded as unavailable in the completed report.
+
+The selected root makes the system resolver consume that process context's resolver files, while the selected network namespace controls routes and sockets. NetWhy changes only its own one-shot CLI process and never writes to or attaches to the target process.
 
 ## TLS behavior
 
@@ -70,7 +100,7 @@ This means NetWhy may differ from applications using a private enterprise trust 
 
 ## Proxy behavior
 
-v0.1 records recognized proxy environment variables but connects directly. Proxy URL credentials must be replaced with `<redacted>` before entering the report model. Both output formats include a note explaining that the probes bypassed the proxy.
+NetWhy records recognized proxy environment variables from its current process or the process selected by `--pid`, but connects directly. Proxy URL credentials must be replaced with `<redacted>` before entering the report model. Both output formats include a note explaining that the probes bypassed the proxy.
 
 Recognized names:
 
@@ -94,7 +124,7 @@ The top-level status controls the process exit code. `warn` exits successfully s
 
 Both formats are projections of the same report and therefore cannot disagree about status, diagnosis, or evidence. Human output puts the conclusion and remediation before detailed evidence, uses textual status markers, and never relies on terminal color. JSON output adds stable document, diagnosis, and error codes so automation does not need to parse prose.
 
-In JSON mode, stdout contains exactly one document. Completed diagnostics conform to `report.schema.json`; invocation and target errors conform to `error.schema.json`. Human usage errors use stderr. The full compatibility rules are specified in [output-contract.md](output-contract.md).
+In JSON mode, stdout contains exactly one document. Completed diagnostics conform to `report.schema.json`; invocation, target, and execution-context errors conform to `error.schema.json`. Human usage errors use stderr. The full compatibility rules are specified in [output-contract.md](output-contract.md).
 
 ## Error and inference rules
 
@@ -114,13 +144,15 @@ Route-command failure alone cannot be the top-level cause if TCP succeeds.
 ## Privacy and security
 
 - The binary forbids unsafe Rust.
-- No shell is used to invoke iproute2; arguments are passed directly to `ip`.
+- No shell is used to invoke iproute2, Docker, or Podman; arguments are passed directly to the executable. Helper processes run in isolated process groups, are terminated as a group at the deadline, and retain no more than 64 KiB per output stream.
 - Target input is parsed before it reaches an HTTP request.
+- Invalid target diagnostics escape terminal control characters before entering either output format.
 - Proxy credentials are redacted in memory before serialization.
 - Target URL userinfo is rejected. Query strings and fragments are replaced with `REDACTED` in reports while the original query remains available only to the in-memory request builder.
 - HTTP status lines are limited to 8 KiB, require CRLF and valid HTTP/1.x syntax, and cannot contain control characters.
 - DNS results are capped at 32 unique addresses; route and TCP fan-out is limited to eight concurrent operations.
-- JSON does not include unrelated environment variables, resolver files, firewall rules, or process lists.
+- A selected process environment read is capped at 8 MiB; exceeding the cap is recorded as unavailable and does not suppress network probes.
+- JSON does not include unrelated environment variables, resolver-file contents, firewall rules, or process lists. Process and container selection read only the resolved PID and retain only supported proxy variables.
 - Future support bundles must make internal-address redaction configurable and visible.
 
 ## Testing strategy
@@ -128,8 +160,10 @@ Route-command failure alone cannot be the top-level cause if TCP succeeds.
 - Pure unit tests for target interpretation and diagnosis precedence.
 - Local TCP listeners for successful and refused transport behavior.
 - Local HTTP listeners for status parsing.
-- A local test TLS server is preferred before v0.1 release.
+- A local rustls server verifies trusted TLS and HTTPS behavior without a public dependency.
 - Route parsing tests use captured iproute2 JSON, not the test host's routing table.
 - JSON reports are validated against `docs/report.schema.json` in CI.
+- Compiled-CLI tests cover validation, all output and exit-code contracts, address-family selection, HTTP/TLS outcomes, broken and unwritable stdout, and selected-process proxy redaction.
+- Capability-aware Linux fixtures verify real entry into isolated mount, root, and network contexts and the structured denial path when the target namespace belongs to an unavailable user context. They skip only when unprivileged user namespaces are disabled by the host.
 - Public internet checks are manually invoked smoke tests and never gate a release.
 - `cargo-llvm-cov` enforces project-wide minimums of 90% lines, 90% regions, and 95% functions, plus an 80% line floor for every measured file. Coverage identifies untested behavior but does not replace assertions or justify artificial tests for unreachable serialization failures.

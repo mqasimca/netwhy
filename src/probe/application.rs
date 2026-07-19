@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     io::{Error, ErrorKind},
     sync::Arc,
     time::Duration,
@@ -92,8 +93,30 @@ async fn probe_https_with_roots_and_source(
     roots: RootCertStore,
     trust_source: &str,
 ) -> ApplicationReport {
+    probe_https_with_connection(
+        target,
+        address,
+        operation_timeout,
+        roots,
+        trust_source,
+        TcpStream::connect(address),
+    )
+    .await
+}
+
+async fn probe_https_with_connection<F>(
+    target: &Target,
+    address: std::net::SocketAddr,
+    operation_timeout: Duration,
+    roots: RootCertStore,
+    trust_source: &str,
+    connection: F,
+) -> ApplicationReport
+where
+    F: Future<Output = std::io::Result<TcpStream>>,
+{
     let connect_started = std::time::Instant::now();
-    let stream = match timeout(operation_timeout, TcpStream::connect(address)).await {
+    let stream = match timeout(operation_timeout, connection).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
             return connect_failure(
@@ -193,8 +216,26 @@ async fn probe_http(
     address: std::net::SocketAddr,
     operation_timeout: Duration,
 ) -> ApplicationReport {
+    probe_http_with_connection(
+        target,
+        address,
+        operation_timeout,
+        TcpStream::connect(address),
+    )
+    .await
+}
+
+async fn probe_http_with_connection<F>(
+    target: &Target,
+    address: std::net::SocketAddr,
+    operation_timeout: Duration,
+    connection: F,
+) -> ApplicationReport
+where
+    F: Future<Output = std::io::Result<TcpStream>>,
+{
     let started = std::time::Instant::now();
-    let stream = timeout(operation_timeout, TcpStream::connect(address)).await;
+    let stream = timeout(operation_timeout, connection).await;
     let mut stream = match stream {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
@@ -458,7 +499,7 @@ fn tls_connector(roots: RootCertStore) -> TlsConnector {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{future::pending, sync::Arc, time::Duration};
 
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use rustls::{
@@ -467,11 +508,14 @@ mod tests {
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, duplex},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
     };
     use tokio_rustls::TlsAcceptor;
 
-    use super::{http_exchange, probe, probe_http, probe_https_with_roots};
+    use super::{
+        http_exchange, probe, probe_http, probe_http_with_connection, probe_https_with_connection,
+        probe_https_with_roots,
+    };
     use crate::{
         model::{AddressFamily, Status, TcpResult},
         target::Target,
@@ -574,6 +618,8 @@ mod tests {
                 response
             },
             b"HTTP/1.1 200 forged\x1b[2J\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\n".to_vec(),
+            b"HTTP/1.1 200 \xff\r\n".to_vec(),
         ] {
             let (mut client, mut server) = duplex(16 * 1024);
             let peer = tokio::spawn(async move {
@@ -587,6 +633,41 @@ mod tests {
 
             assert_eq!(result.status, Status::Fail);
             assert!(result.error.is_some());
+            peer.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_excessive_informational_responses_and_headers() {
+        let mut responses = Vec::new();
+        for _ in 0..=super::MAX_INFORMATIONAL_RESPONSES {
+            responses.extend_from_slice(b"HTTP/1.1 103 Early Hints\r\n\r\n");
+        }
+        let mut oversized_headers = b"HTTP/1.1 103 Early Hints\r\n".to_vec();
+        let header = format!("X-Fill: {}\r\n", "x".repeat(8_000));
+        while oversized_headers.len() <= super::MAX_INFORMATIONAL_HEADER_BYTES {
+            oversized_headers.extend_from_slice(header.as_bytes());
+        }
+
+        for (response, expected) in [
+            (responses, "too many informational HTTP responses"),
+            (
+                oversized_headers,
+                "informational HTTP headers exceed the safety limit",
+            ),
+        ] {
+            let (mut client, mut server) = duplex(128 * 1024);
+            let peer = tokio::spawn(async move {
+                let mut request = [0_u8; 512];
+                let _ = server.read(&mut request).await.unwrap();
+                server.write_all(&response).await.unwrap();
+            });
+            let target = Target::parse("http://example.test/").unwrap();
+
+            let result = http_exchange(&mut client, &target, Duration::from_secs(1)).await;
+
+            assert_eq!(result.status, Status::Fail);
+            assert_eq!(result.error.as_deref(), Some(expected));
             peer.await.unwrap();
         }
     }
@@ -728,6 +809,63 @@ mod tests {
         assert_eq!(result.connect.status, Status::Fail);
         assert!(result.connect.error.is_some());
         assert!(result.tls.is_none());
+    }
+
+    #[tokio::test]
+    async fn bounds_fresh_application_connection_attempts() {
+        let address = "192.0.2.1:443".parse().unwrap();
+        let http_target = Target::parse("http://example.test/").unwrap();
+        let https_target = Target::parse("https://example.test/").unwrap();
+
+        let http = probe_http_with_connection(
+            &http_target,
+            address,
+            Duration::from_millis(1),
+            pending::<std::io::Result<TcpStream>>(),
+        )
+        .await;
+        let https = probe_https_with_connection(
+            &https_target,
+            address,
+            Duration::from_millis(1),
+            RootCertStore::empty(),
+            "custom_roots",
+            pending::<std::io::Result<TcpStream>>(),
+        )
+        .await;
+
+        assert_eq!(http.connect.error_kind.as_deref(), Some("timeout"));
+        assert_eq!(https.connect.error_kind.as_deref(), Some("timeout"));
+    }
+
+    #[tokio::test]
+    async fn reports_an_invalid_tls_server_name() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            drop(accept_with_timeout(&listener).await);
+        });
+        let mut target = Target::parse(&format!("https://localhost:{}/", address.port())).unwrap();
+        target.host.clear();
+
+        let result = probe_https_with_roots(
+            &target,
+            address,
+            Duration::from_secs(1),
+            RootCertStore::empty(),
+        )
+        .await;
+
+        assert_eq!(result.status, Status::Fail);
+        assert!(
+            result
+                .tls
+                .unwrap()
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid TLS server name"))
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]

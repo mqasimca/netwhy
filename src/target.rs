@@ -55,8 +55,12 @@ impl Target {
             }
         }
 
-        let url = Url::parse(&format!("https://{input}/"))
-            .with_context(|| format!("invalid hostname or endpoint: {input}"))?;
+        let url = Url::parse(&format!("https://{input}/")).with_context(|| {
+            format!(
+                "invalid hostname or endpoint: {}",
+                sanitize_report_text(input)
+            )
+        })?;
         Self::from_url(input, &url)
     }
 
@@ -221,8 +225,10 @@ mod tests {
 
     #[test]
     fn rejects_port_zero() {
-        let error = Target::parse("127.0.0.1:0").unwrap_err();
-        assert!(error.to_string().contains("between 1 and 65535"));
+        for value in ["127.0.0.1:0", "http://127.0.0.1:0/"] {
+            let error = Target::parse(value).unwrap_err();
+            assert!(error.to_string().contains("between 1 and 65535"));
+        }
     }
 
     #[test]
@@ -281,5 +287,31 @@ mod tests {
         let url = url::Url::parse("tcp:path").unwrap();
         let error = Target::from_url("tcp:path", &url).unwrap_err();
         assert!(error.to_string().contains("hostname or IP address"));
+    }
+
+    #[test]
+    fn parses_ip_literal_urls() {
+        let ipv4 = Target::parse("http://192.0.2.1/").unwrap();
+        let ipv6 = Target::parse("https://[2001:db8::1]/").unwrap();
+
+        assert_eq!(ipv4.host, "192.0.2.1");
+        assert_eq!(ipv4.host_header(), "192.0.2.1");
+        assert_eq!(ipv6.host, "2001:db8::1");
+        assert_eq!(ipv6.host_header(), "[2001:db8::1]");
+    }
+
+    #[test]
+    fn builds_application_paths_and_host_headers() {
+        let target = Target::parse("https://example.com/search?q=rust").unwrap();
+        let non_default = Target::parse("http://example.com:8080").unwrap();
+        let tcp = Target::parse("example.com:443").unwrap();
+
+        assert_eq!(target.request_path(), "/search?q=rust");
+        assert_eq!(target.host_header(), "example.com");
+        assert_eq!(non_default.request_path(), "/");
+        assert_eq!(non_default.host_header(), "example.com:8080");
+        assert_eq!(tcp.request_path(), "/");
+        assert_eq!(tcp.host_header(), "example.com:443");
+        assert_eq!(tcp.url_report_value(), "example.com:443");
     }
 }

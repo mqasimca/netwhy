@@ -149,10 +149,10 @@ fn resolved_result(
 
 #[cfg(test)]
 mod tests {
-    use std::{future::pending, io, time::Instant};
+    use std::{future::pending, future::ready, io, time::Instant};
 
-    use super::{resolve_lookup, resolved_result};
-    use crate::model::Status;
+    use super::{resolve, resolve_lookup, resolved_result};
+    use crate::{model::Status, target::Target};
 
     #[test]
     fn filters_and_deduplicates_resolved_addresses() {
@@ -220,5 +220,62 @@ mod tests {
         assert_eq!(result.status, Status::Fail);
         assert_eq!(result.error_kind.as_deref(), Some("timeout"));
         assert!(result.error.unwrap().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn reports_and_sanitizes_resolver_errors() {
+        let result = resolve_lookup(
+            Instant::now(),
+            ready(Err::<Vec<std::net::SocketAddr>, _>(io::Error::other(
+                "resolver\nfailed",
+            ))),
+            false,
+            false,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(result.status, Status::Fail);
+        assert_eq!(result.error_kind.as_deref(), Some("resolver_error"));
+        assert_eq!(result.error.as_deref(), Some("resolver\\nfailed"));
+    }
+
+    #[tokio::test]
+    async fn resolves_ip_literals_without_using_the_system_resolver() {
+        let ipv4 = Target::parse("192.0.2.1:443").unwrap();
+        let ipv6 = Target::parse("[2001:db8::1]:443").unwrap();
+
+        let v4 = resolve(&ipv4, false, false, std::time::Duration::from_secs(1)).await;
+        let v6 = resolve(&ipv6, false, false, std::time::Duration::from_secs(1)).await;
+
+        assert_eq!(v4.status, Status::Pass);
+        assert_eq!(v4.addresses, vec!["192.0.2.1:443".parse().unwrap()]);
+        assert_eq!(v6.status, Status::Pass);
+        assert_eq!(v6.addresses, vec!["[2001:db8::1]:443".parse().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn rejects_ip_literals_from_the_unrequested_address_family() {
+        let ipv4 = Target::parse("192.0.2.1:443").unwrap();
+        let ipv6 = Target::parse("[2001:db8::1]:443").unwrap();
+
+        let v4 = resolve(&ipv4, false, true, std::time::Duration::from_secs(1)).await;
+        let v6 = resolve(&ipv6, true, false, std::time::Duration::from_secs(1)).await;
+
+        assert_eq!(v4.status, Status::Fail);
+        assert_eq!(v4.error_kind.as_deref(), Some("address_family_mismatch"));
+        assert_eq!(v6.status, Status::Fail);
+        assert_eq!(v6.error_kind.as_deref(), Some("address_family_mismatch"));
+    }
+
+    #[tokio::test]
+    async fn resolves_localhost_through_the_system_resolver() {
+        let target = Target::parse("localhost:443").unwrap();
+
+        let result = resolve(&target, false, false, std::time::Duration::from_secs(1)).await;
+
+        assert_eq!(result.status, Status::Pass);
+        assert!(!result.addresses.is_empty());
+        assert!(result.addresses.iter().all(|address| address.port() == 443));
     }
 }

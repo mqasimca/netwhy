@@ -12,8 +12,66 @@ use cli::Cli;
 use model::{
     AddressFamilySelection, ProxyVariable, RequestInfo, SCHEMA_VERSION, TargetReport, ToolInfo,
 };
-pub use model::{DiagnosisCode, DiagnosticReport, ErrorCode, ErrorReport, Status};
+pub use model::{
+    CapabilityStatus, ContextRelation, DiagnosisCode, DiagnosticReport, ErrorCode, ErrorReport,
+    ExecutionContextInfo, ExecutionContextSource, ProxyEnvironmentStatus, Status,
+};
 use target::Target;
+
+#[derive(Debug, Clone)]
+pub struct DiagnosticContext {
+    execution: ExecutionContextInfo,
+    proxies: Vec<ProxyVariable>,
+}
+
+impl DiagnosticContext {
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            execution: ExecutionContextInfo::current(),
+            proxies: proxy_variables(),
+        }
+    }
+
+    #[must_use]
+    pub fn selected_process(
+        execution: ExecutionContextInfo,
+        environment: &[(String, String)],
+    ) -> Self {
+        Self {
+            execution,
+            proxies: proxy_variables_from_lookup(|name| {
+                environment
+                    .iter()
+                    .find(|(candidate, _)| candidate == name)
+                    .map(|(_, value)| value.clone())
+            }),
+        }
+    }
+
+    /// Build a context from the NUL-delimited contents of `/proc/<pid>/environ`.
+    /// Only recognized proxy variables are retained.
+    #[must_use]
+    pub fn selected_process_environ(execution: ExecutionContextInfo, environment: &[u8]) -> Self {
+        Self {
+            execution,
+            proxies: proxy_variables_from_lookup(|name| {
+                environment.split(|byte| *byte == 0).find_map(|entry| {
+                    let separator = entry.iter().position(|byte| *byte == b'=')?;
+                    let (candidate, value) = entry.split_at(separator);
+                    let value = value.get(1..)?;
+                    (candidate == name.as_bytes())
+                        .then(|| std::str::from_utf8(value).ok().map(ToOwned::to_owned))?
+                })
+            }),
+        }
+    }
+
+    #[must_use]
+    pub const fn execution(&self) -> &ExecutionContextInfo {
+        &self.execution
+    }
+}
 
 /// Run every diagnostic stage and return a serializable report.
 ///
@@ -21,6 +79,18 @@ use target::Target;
 ///
 /// Returns an error when the target is empty, malformed, or uses an unsupported scheme.
 pub async fn diagnose(cli: &Cli) -> Result<DiagnosticReport> {
+    diagnose_with_context(cli, DiagnosticContext::current()).await
+}
+
+/// Run every diagnostic stage using an explicitly selected execution context.
+///
+/// # Errors
+///
+/// Returns an error when the target is empty, malformed, or uses an unsupported scheme.
+pub async fn diagnose_with_context(
+    cli: &Cli,
+    context: DiagnosticContext,
+) -> Result<DiagnosticReport> {
     let started = Instant::now();
     let target = Target::parse(&cli.target)?;
     let timeout = Duration::from_millis(cli.timeout_ms);
@@ -29,8 +99,6 @@ pub async fn diagnose(cli: &Cli) -> Result<DiagnosticReport> {
     let routes = probe::route::inspect_all(&dns.addresses, timeout).await;
     let tcp = probe::tcp::connect_all(&dns.addresses, timeout).await;
     let application_attempts = probe::application::probe(&target, &tcp, timeout).await;
-    let proxies = proxy_variables();
-
     let mut report = DiagnosticReport {
         schema_version: SCHEMA_VERSION,
         kind: "diagnostic_report".to_owned(),
@@ -51,13 +119,14 @@ pub async fn diagnose(cli: &Cli) -> Result<DiagnosticReport> {
             },
             application_transport: "direct".to_owned(),
             proxy_mode: "detect_only".to_owned(),
+            execution_context: context.execution,
         },
         target: TargetReport::from(&target),
         dns,
         routes,
         tcp,
         application_attempts,
-        proxies,
+        proxies: context.proxies,
         diagnosis: model::Diagnosis::default(),
         overall: Status::Skip,
         exit_code: 2,
@@ -68,6 +137,12 @@ pub async fn diagnose(cli: &Cli) -> Result<DiagnosticReport> {
 }
 
 fn proxy_variables() -> Vec<ProxyVariable> {
+    proxy_variables_from_lookup(|name| std::env::var(name).ok())
+}
+
+fn proxy_variables_from_lookup(
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> Vec<ProxyVariable> {
     const NAMES: [&str; 8] = [
         "HTTPS_PROXY",
         "https_proxy",
@@ -82,8 +157,7 @@ fn proxy_variables() -> Vec<ProxyVariable> {
     NAMES
         .into_iter()
         .filter_map(|name| {
-            std::env::var(name)
-                .ok()
+            lookup(name)
                 .filter(|value| !value.is_empty())
                 .map(|value| ProxyVariable {
                     name: name.to_owned(),
@@ -118,7 +192,9 @@ fn redact_proxy_value(name: &str, value: &str) -> String {
     sanitize_report_text(&redacted)
 }
 
-pub(crate) fn sanitize_report_text(value: impl AsRef<str>) -> String {
+/// Escapes control characters before untrusted text is included in diagnostics.
+#[must_use]
+pub fn sanitize_report_text(value: impl AsRef<str>) -> String {
     let value = value.as_ref();
     let mut sanitized = String::with_capacity(value.len());
     for character in value.chars() {
@@ -133,7 +209,7 @@ pub(crate) fn sanitize_report_text(value: impl AsRef<str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_proxy_value;
+    use super::{DiagnosticContext, ExecutionContextInfo, redact_proxy_value};
 
     #[test]
     fn redacts_proxy_credentials() {
@@ -168,5 +244,34 @@ mod tests {
             redact_proxy_value("NO_PROXY", "localhost,.example.com"),
             "localhost,.example.com"
         );
+    }
+
+    #[test]
+    fn process_environment_retains_only_supported_redacted_proxy_values() {
+        let context = DiagnosticContext::selected_process_environ(
+            ExecutionContextInfo::current(),
+            b"DATABASE_PASSWORD=secret\0HTTPS_PROXY=http://alice:secret@proxy.example:8080\0NO_PROXY=localhost,service=a\0",
+        );
+
+        assert_eq!(context.proxies.len(), 2);
+        assert_eq!(context.proxies[0].name, "HTTPS_PROXY");
+        assert_eq!(
+            context.proxies[0].value,
+            "http://<redacted>@proxy.example:8080"
+        );
+        assert_eq!(context.proxies[1].name, "NO_PROXY");
+        assert_eq!(context.proxies[1].value, "localhost,service=a");
+    }
+
+    #[test]
+    fn process_environment_ignores_empty_and_non_utf8_proxy_values() {
+        let context = DiagnosticContext::selected_process_environ(
+            ExecutionContextInfo::current(),
+            b"HTTPS_PROXY=\xff\0HTTP_PROXY=\0http_proxy=http://proxy.example\0",
+        );
+
+        assert_eq!(context.proxies.len(), 1);
+        assert_eq!(context.proxies[0].name, "http_proxy");
+        assert_eq!(context.proxies[0].value, "http://proxy.example");
     }
 }

@@ -30,7 +30,7 @@ All JSON documents contain:
 - `overall`: final status;
 - `exit_code`: the process exit code represented by the document.
 
-A diagnostic report also contains `request` with the effective timeout, address-family selection, direct transport, and proxy behavior. Its `diagnosis.code` is a stable programmatic classification. v0.1 defines:
+A diagnostic report also contains `request` with the effective timeout, address-family selection, direct transport, proxy behavior, and execution context. `request.execution_context.source` is `current_process`, `process`, `docker`, or `podman`. Selected contexts include `target_pid`; Docker and Podman contexts also include `target_container`. The object records whether the network namespace, mount namespace, and root were shared or entered, where proxy variables came from, and which Linux capabilities were needed. Its `diagnosis.code` is a stable programmatic classification. v0.1 defines:
 
 Application evidence is emitted as `application_attempts`, ordered by probe preference. Failed attempts remain visible when a later address succeeds. Every attempt separates its fresh TCP `connect` evidence from optional TLS and HTTP evidence.
 
@@ -61,11 +61,12 @@ Error documents use stable `error.code` values:
 | --- | --- |
 | `INVALID_INVOCATION` | Command-line arguments are missing, unknown, conflicting, or invalid. |
 | `INVALID_TARGET` | The target syntax or scheme is unsupported. |
+| `CONTEXT_UNAVAILABLE` | The selected process or container disappeared, its context could not be inspected, its runtime was remote, or required namespace/root capabilities were unavailable. |
 | `OUTPUT_ERROR` | NetWhy could not write or serialize its result. |
 
 Messages, summaries, hints, and suggestions are for display and may improve within a schema version. Consumers must branch on codes and statuses, not English text.
 
-Error documents include `error.retryable`. It is `true` only for `OUTPUT_ERROR`; invocation and target errors require corrected input.
+Error documents include `error.retryable`. It is `true` only for `OUTPUT_ERROR`; invocation, target, and execution-context errors require corrected input, runtime selection, or permissions.
 
 `--help` and `--version` are metadata commands and remain plain text even when `--json` is also present. All diagnostic runs and invocation errors honor JSON mode.
 
@@ -75,6 +76,6 @@ Error documents include `error.retryable`. It is `true` only for `OUTPUT_ERROR`;
 | --- | --- | --- |
 | `0` | `pass` or `warn` | The target is reachable; inspect warnings for application or partial-family issues. |
 | `1` | `fail` | Connectivity or the requested application protocol failed. |
-| `2` | `fail` | The invocation was invalid or NetWhy could not produce its requested output. |
+| `2` | `fail` | The invocation or selected process context was invalid, or NetWhy could not produce its requested output. |
 
 For completed reports, the process status and JSON `exit_code` must be identical. If stdout itself cannot be written, NetWhy makes a best-effort structured error on stderr because the requested output stream is unavailable.
