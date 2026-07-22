@@ -418,6 +418,16 @@ fn parse_iproute2_route(address: SocketAddr, json: &[u8]) -> Result<RouteResult,
         interface: string_field(route, "dev"),
         gateway: string_field(route, "gateway"),
         source: string_field(route, "prefsrc").or_else(|| string_field(route, "src")),
+        mtu: numeric_field(route, "mtu").or_else(|| {
+            route
+                .get("metrics")
+                .and_then(|metrics| numeric_field(metrics, "mtu"))
+        }),
+        advmss: numeric_field(route, "advmss").or_else(|| {
+            route
+                .get("metrics")
+                .and_then(|metrics| numeric_field(metrics, "advmss"))
+        }),
         error_kind: None,
         error: None,
     })
@@ -429,6 +439,7 @@ fn parse_macos_route(address: SocketAddr, output: &[u8]) -> Result<RouteResult, 
         .map_err(|error| format!("invalid macOS route output: {error}"))?;
     let mut interface = None;
     let mut gateway = None;
+    let mut mtu = None;
 
     for line in output.lines() {
         let Some((name, value)) = line.split_once(':') else {
@@ -445,6 +456,9 @@ fn parse_macos_route(address: SocketAddr, output: &[u8]) -> Result<RouteResult, 
             "gateway" if gateway.is_none() => {
                 gateway = Some(sanitize_report_text(value));
             }
+            "mtu" if mtu.is_none() => {
+                mtu = value.parse().ok();
+            }
             _ => {}
         }
     }
@@ -459,6 +473,8 @@ fn parse_macos_route(address: SocketAddr, output: &[u8]) -> Result<RouteResult, 
         interface,
         gateway,
         source: None,
+        mtu,
+        advmss: None,
         error_kind: None,
         error: None,
     })
@@ -469,6 +485,11 @@ fn string_field(value: &Value, name: &str) -> Option<String> {
     value.get(name)?.as_str().map(sanitize_report_text)
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn numeric_field(value: &Value, name: &str) -> Option<u32> {
+    u32::try_from(value.get(name)?.as_u64()?).ok()
+}
+
 fn failed(address: SocketAddr, error_kind: &str, error: String) -> RouteResult {
     RouteResult {
         status: Status::Fail,
@@ -476,6 +497,8 @@ fn failed(address: SocketAddr, error_kind: &str, error: String) -> RouteResult {
         interface: None,
         gateway: None,
         source: None,
+        mtu: None,
+        advmss: None,
         error_kind: Some(error_kind.to_owned()),
         error: Some(sanitize_report_text(error)),
     }
@@ -488,6 +511,8 @@ fn skipped(address: SocketAddr, error_kind: &str, error: String) -> RouteResult 
         interface: None,
         gateway: None,
         source: None,
+        mtu: None,
+        advmss: None,
         error_kind: Some(error_kind.to_owned()),
         error: Some(sanitize_report_text(error)),
     }
@@ -511,7 +536,7 @@ mod tests {
     #[test]
     fn parses_iproute2_json() {
         let address: SocketAddr = "203.0.113.10:443".parse().unwrap();
-        let json = br#"[{"dst":"203.0.113.10","gateway":"192.168.1.1","dev":"enp5s0","prefsrc":"192.168.1.20"}]"#;
+        let json = br#"[{"dst":"203.0.113.10","gateway":"192.168.1.1","dev":"enp5s0","prefsrc":"192.168.1.20","mtu":1420,"advmss":1380}]"#;
 
         let route = parse_iproute2_route(address, json).unwrap();
 
@@ -519,6 +544,8 @@ mod tests {
         assert_eq!(route.interface.as_deref(), Some("enp5s0"));
         assert_eq!(route.gateway.as_deref(), Some("192.168.1.1"));
         assert_eq!(route.source.as_deref(), Some("192.168.1.20"));
+        assert_eq!(route.mtu, Some(1420));
+        assert_eq!(route.advmss, Some(1380));
     }
 
     #[test]
@@ -530,6 +557,19 @@ mod tests {
         assert_eq!(route.source.as_deref(), Some("192.168.1.21"));
         assert!(route.interface.is_none());
         assert!(route.gateway.is_none());
+    }
+
+    #[test]
+    fn parses_nested_iproute2_metrics() {
+        let address: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let route = parse_iproute2_route(
+            address,
+            br#"[{"dev":"eth0","metrics":{"mtu":1280,"advmss":1240}}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(route.mtu, Some(1280));
+        assert_eq!(route.advmss, Some(1240));
     }
 
     #[test]
@@ -700,6 +740,8 @@ mod tests {
                 interface: Some(format!("test{}", address.port())),
                 gateway: None,
                 source: None,
+                mtu: None,
+                advmss: None,
                 error_kind: None,
                 error: None,
             }
@@ -728,6 +770,8 @@ mod tests {
                 interface: None,
                 gateway: None,
                 source: None,
+                mtu: None,
+                advmss: None,
                 error_kind: None,
                 error: None,
             }

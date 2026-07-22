@@ -1,0 +1,30 @@
+Name:           netwhy
+Version:        @RPM_VERSION@
+Release:        @RPM_RELEASE@%{?dist}
+Summary:        Explain why a network connection succeeds or fails
+License:        MIT
+URL:            https://github.com/mqasimca/netwhy
+Source0:        netwhy
+BuildArch:      @ARCH@
+
+%description
+NetWhy correlates DNS, route, TCP, TLS, HTTP, proxy, firewall, MTU,
+resolver, and execution-context evidence into a deterministic diagnosis.
+
+%prep
+
+%build
+
+%install
+install -D -m 0755 %{SOURCE0} %{buildroot}%{_bindir}/netwhy
+install -D -m 0644 %{_sourcedir}/LICENSE %{buildroot}%{_licensedir}/netwhy/LICENSE
+install -D -m 0644 %{_sourcedir}/README.md %{buildroot}%{_docdir}/netwhy/README.md
+
+%files
+%license %{_licensedir}/netwhy/LICENSE
+%doc %{_docdir}/netwhy/README.md
+%{_bindir}/netwhy
+
+%changelog
+* Tue Jul 21 2026 NetWhy maintainers <maintainers@netwhy.dev> - @RPM_VERSION@-@RPM_RELEASE@
+- Automated NetWhy release package.

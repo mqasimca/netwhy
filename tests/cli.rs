@@ -1,23 +1,20 @@
-#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    process::Child,
-    sync::atomic::{AtomicU64, Ordering},
-};
-use std::{
     io::{Read, Write},
     net::TcpListener,
+    path::PathBuf,
     process::{Command, Output, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
 };
+#[cfg(target_os = "linux")]
+use std::{path::Path, process::Child};
 
 use netwhy::{ErrorCode, ErrorReport};
 use serde_json::Value;
 use socket2::{Domain, SockAddr, Socket, Type};
 
-#[cfg(target_os = "linux")]
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "linux")]
@@ -59,7 +56,6 @@ fn netwhy_with_unwritable_stdout(args: &[&str]) -> Output {
         .unwrap()
 }
 
-#[cfg(target_os = "linux")]
 fn unique_temp_path(label: &str) -> PathBuf {
     let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("netwhy-{label}-{}-{id}", std::process::id()))
@@ -151,6 +147,16 @@ fn assert_error_schema(value: &Value) {
 
 fn assert_report_schema(value: &Value) {
     let schema: Value = serde_json::from_str(include_str!("../docs/report.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let errors = validator
+        .iter_errors(value)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(errors.is_empty(), "schema errors: {errors:#?}");
+}
+
+fn assert_comparison_schema(value: &Value) {
+    let schema: Value = serde_json::from_str(include_str!("../docs/compare.schema.json")).unwrap();
     let validator = jsonschema::validator_for(&schema).unwrap();
     let errors = validator
         .iter_errors(value)
@@ -302,6 +308,29 @@ fn invalid_target_is_a_structured_json_error() {
     assert_eq!(error["kind"], "error");
     assert_eq!(error["error"]["code"], "INVALID_TARGET");
     assert_eq!(error["exit_code"], 2);
+    assert_error_schema(&error);
+}
+
+#[test]
+fn report_command_keeps_post_parse_target_errors_in_json_mode() {
+    let output = netwhy(&["report", "ftp://example.test"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let error = parse_json(&output);
+    assert_eq!(error["error"]["code"], "INVALID_TARGET");
+    assert_error_schema(&error);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn report_command_keeps_context_errors_in_json_mode() {
+    let output = netwhy(&["report", "--pid", "4000000000", "example.test"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let error = parse_json(&output);
+    assert_eq!(error["error"]["code"], "CONTEXT_UNAVAILABLE");
     assert_error_schema(&error);
 }
 
@@ -1348,6 +1377,154 @@ fn proxy_credentials_are_redacted_before_json_serialization() {
         proxy["value"],
         "http://<redacted>@proxy.example/path@tag?next=@later"
     );
+}
+
+#[test]
+fn report_command_applies_visible_strict_redaction() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let stream = accept_with_timeout(&listener);
+        drop(stream);
+    });
+
+    let output = netwhy(&[
+        "report",
+        "--redaction",
+        "strict",
+        &address.to_string(),
+        "--timeout-ms",
+        "500",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    assert_eq!(report["request"]["redaction"], "strict");
+    assert!(
+        report["target"]["host"]
+            .as_str()
+            .unwrap()
+            .ends_with(".redacted")
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("127.0.0.1"));
+    assert_report_schema(&report);
+    server.join().unwrap();
+}
+
+#[test]
+fn compare_command_emits_schema_valid_json_and_human_output() {
+    let (_reservation, address) = reserved_refused_address();
+    let source = netwhy(&["--json", &address.to_string(), "--timeout-ms", "100"]);
+    assert_eq!(source.status.code(), Some(1));
+    let left = unique_temp_path("compare-left.json");
+    let right = unique_temp_path("compare-right.json");
+    fs::write(&left, &source.stdout).unwrap();
+    let mut changed = parse_json(&source);
+    changed["diagnosis"]["summary"] = Value::String("different summary".to_owned());
+    fs::write(&right, serde_json::to_vec(&changed).unwrap()).unwrap();
+
+    let json = netwhy(&[
+        "compare",
+        "--json",
+        left.to_str().unwrap(),
+        right.to_str().unwrap(),
+    ]);
+    let human = netwhy(&["compare", left.to_str().unwrap(), right.to_str().unwrap()]);
+
+    assert!(json.status.success());
+    assert!(human.status.success());
+    let comparison = parse_json(&json);
+    assert_eq!(comparison["overall"], "warn");
+    assert!(
+        comparison["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| { change["path"] == "/diagnosis/summary" })
+    );
+    assert_comparison_schema(&comparison);
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Differences:"));
+
+    fs::remove_file(left).unwrap();
+    fs::remove_file(right).unwrap();
+}
+
+#[test]
+fn completions_command_generates_each_supported_shell() {
+    for shell in ["bash", "elvish", "fish", "powershell", "zsh"] {
+        let output = netwhy(&["completions", shell]);
+        assert!(
+            output.status.success(),
+            "{shell}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.len() > 100,
+            "{shell} completion output was empty"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("netwhy"));
+    }
+}
+
+#[test]
+fn external_plugin_protocol_is_bounded_parsed_and_reported() {
+    let plugin = unique_temp_path("evidence-plugin");
+    fs::write(
+        &plugin,
+        "#!/bin/sh\nprintf '%s\\n' '{\"protocol_version\":1,\"name\":\"fixture\",\"status\":\"warn\",\"summary\":\"fixture warning\",\"evidence\":{\"region\":\"test\"}}'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&plugin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plugin, permissions).unwrap();
+    let (_reservation, address) = reserved_refused_address();
+
+    let output = netwhy(&[
+        "--json",
+        "--plugin",
+        plugin.to_str().unwrap(),
+        &address.to_string(),
+        "--timeout-ms",
+        "250",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let report = parse_json(&output);
+    assert_eq!(report["plugins"][0]["name"], "fixture");
+    assert_eq!(report["plugins"][0]["status"], "warn");
+    assert_eq!(report["plugins"][0]["evidence"]["region"], "test");
+    assert_report_schema(&report);
+    fs::remove_file(plugin).unwrap();
+}
+
+#[test]
+fn invalid_proxy_urls_and_excess_plugin_counts_are_invocation_errors() {
+    let invalid_proxy = netwhy(&["--json", "--proxy-url", "ftp://proxy.test", "127.0.0.1:9"]);
+    assert_eq!(invalid_proxy.status.code(), Some(2));
+    let error = parse_json(&invalid_proxy);
+    assert_eq!(error["error"]["code"], "INVALID_INVOCATION");
+    assert_error_schema(&error);
+
+    let mut arguments = vec!["--json"];
+    for _ in 0..9 {
+        arguments.extend(["--plugin", "/bin/true"]);
+    }
+    arguments.push("127.0.0.1:9");
+    let too_many_plugins = netwhy(&arguments);
+    assert_eq!(too_many_plugins.status.code(), Some(2));
+    let error = parse_json(&too_many_plugins);
+    assert_eq!(error["error"]["code"], "INVALID_INVOCATION");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("at most 8")
+    );
+    assert_error_schema(&error);
 }
 
 #[test]

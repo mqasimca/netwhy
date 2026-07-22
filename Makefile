@@ -5,7 +5,7 @@ DESTDIR ?=
 BINDIR ?= $(PREFIX)/bin
 
 .PHONY: all build check verify test test-unit test-integration test-cli test-msrv \
-	lint coverage coverage-html package test-install install uninstall clean
+	lint coverage coverage-html package test-packaging test-install install uninstall clean
 
 all: check
 
@@ -23,6 +23,7 @@ verify:
 	$(MAKE) --no-print-directory test-msrv
 	$(MAKE) --no-print-directory build
 	$(MAKE) --no-print-directory package
+	$(MAKE) --no-print-directory test-packaging
 	$(MAKE) --no-print-directory test-install
 
 test:
@@ -54,6 +55,9 @@ coverage-html:
 
 package:
 	$(CARGO) package --allow-dirty --locked
+
+test-packaging:
+	packaging/test-packaging.sh
 
 test-install:
 	@stage=$$(mktemp -d /tmp/netwhy-install.XXXXXX); \

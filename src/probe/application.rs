@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     future::Future,
     io::{Error, ErrorKind},
     sync::Arc,
@@ -6,24 +7,42 @@ use std::{
 };
 
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{
         AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
         BufReader,
     },
-    net::TcpStream,
+    net::{TcpStream, lookup_host},
     time::timeout,
 };
 use tokio_rustls::TlsConnector;
 
 use crate::{
     model::{
-        ApplicationConnectResult, ApplicationReport, HttpResult, Status, TcpResult, TlsResult,
+        ApplicationConnectResult, ApplicationReport, CertificateInfo, HttpResult,
+        ProxyConnectResult, ProxyTransportEvidence, Status, TcpResult, TlsResult,
     },
     probe::tcp::error_kind,
+    proxy::{SelectedProxy, basic_authorization},
     sanitize_report_text,
     target::Target,
 };
+
+trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> IoStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+type BoxedIo = Box<dyn IoStream>;
+
+#[derive(Debug)]
+struct HttpConnectStatusError(u16);
+
+impl std::fmt::Display for HttpConnectStatusError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "proxy CONNECT returned HTTP {}", self.0)
+    }
+}
+
+impl std::error::Error for HttpConnectStatusError {}
 
 pub async fn probe(
     target: &Target,
@@ -56,15 +75,490 @@ pub async fn probe(
     attempts
 }
 
+pub(crate) async fn probe_via_proxy(
+    target: &Target,
+    proxy: &SelectedProxy,
+    operation_timeout: Duration,
+) -> (Vec<ApplicationReport>, ProxyTransportEvidence) {
+    let mut applications = Vec::new();
+    let mut proxy_attempts = Vec::new();
+    for address in proxy.addresses.iter().copied() {
+        let started = std::time::Instant::now();
+        let stream = open_proxy_stream(proxy, target, address, operation_timeout).await;
+        let (stream, tunnel_status) = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                let duration_ms = started.elapsed().as_millis();
+                record_proxy_failure(
+                    &mut applications,
+                    &mut proxy_attempts,
+                    target,
+                    address,
+                    duration_ms,
+                    &error,
+                );
+                continue;
+            }
+        };
+        let duration_ms = started.elapsed().as_millis();
+        let application = probe_proxy_application(
+            target,
+            proxy,
+            address,
+            successful_connect(duration_ms),
+            stream,
+            operation_timeout,
+        )
+        .await;
+        let proxy_rejection = (target.scheme == "http"
+            && matches!(proxy.scheme(), "http" | "https"))
+        .then(|| forwarded_proxy_rejection(&application))
+        .flatten();
+        proxy_attempts.push(ProxyConnectResult {
+            status: if proxy_rejection.is_some() {
+                Status::Fail
+            } else {
+                Status::Pass
+            },
+            address,
+            duration_ms,
+            tunnel_status,
+            error_kind: proxy_rejection.map(|_| "permission_denied".to_owned()),
+            error: proxy_rejection
+                .map(|status| format!("forward proxy rejected the request with HTTP {status}")),
+        });
+        let reachable = proxy_rejection.is_none() && !application.status.is_failure();
+        applications.push(application);
+        if reachable {
+            break;
+        }
+    }
+    let status = if proxy_attempts
+        .iter()
+        .any(|attempt| attempt.status == Status::Pass)
+    {
+        Status::Pass
+    } else {
+        Status::Fail
+    };
+    (
+        applications,
+        ProxyTransportEvidence {
+            status,
+            mode: "proxy".to_owned(),
+            selected_proxy: Some(proxy.redacted_url.clone()),
+            bypassed: false,
+            attempts: proxy_attempts,
+            error_kind: None,
+            error: None,
+        },
+    )
+}
+
+fn forwarded_proxy_rejection(application: &ApplicationReport) -> Option<u16> {
+    application
+        .http
+        .as_ref()
+        .and_then(|http| http.status_code)
+        .filter(|status| *status == 407)
+}
+
+fn record_proxy_failure(
+    applications: &mut Vec<ApplicationReport>,
+    proxy_attempts: &mut Vec<ProxyConnectResult>,
+    target: &Target,
+    address: std::net::SocketAddr,
+    duration_ms: u128,
+    error: &Error,
+) {
+    let kind = error_kind(error.kind()).to_owned();
+    let message = sanitize_report_text(error.to_string());
+    let tunnel_status = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<HttpConnectStatusError>())
+        .map(|source| source.0);
+    proxy_attempts.push(ProxyConnectResult {
+        status: Status::Fail,
+        address,
+        duration_ms,
+        tunnel_status,
+        error_kind: Some(kind.clone()),
+        error: Some(message.clone()),
+    });
+    applications.push(connect_failure(
+        &target.scheme,
+        address,
+        duration_ms,
+        &kind,
+        message,
+    ));
+}
+
+async fn probe_proxy_application(
+    target: &Target,
+    proxy: &SelectedProxy,
+    address: std::net::SocketAddr,
+    connect: ApplicationConnectResult,
+    stream: BoxedIo,
+    operation_timeout: Duration,
+) -> ApplicationReport {
+    match target.scheme.as_str() {
+        "tcp" => ApplicationReport {
+            status: Status::Pass,
+            protocol: "tcp".to_owned(),
+            address,
+            connect,
+            tls: None,
+            http: None,
+        },
+        "https" => probe_https_stream(target, address, connect, stream, operation_timeout).await,
+        "http" => {
+            let mut stream = stream;
+            let authorization = basic_authorization(proxy);
+            let http = if matches!(proxy.scheme(), "http" | "https") {
+                http_exchange_proxy(
+                    &mut stream,
+                    target,
+                    authorization.as_deref(),
+                    operation_timeout,
+                )
+                .await
+            } else {
+                http_exchange(&mut stream, target, operation_timeout).await
+            };
+            ApplicationReport {
+                status: http.status,
+                protocol: "http".to_owned(),
+                address,
+                connect,
+                tls: None,
+                http: Some(http),
+            }
+        }
+        _ => unreachable!("target parser restricts schemes"),
+    }
+}
+
+async fn open_proxy_stream(
+    proxy: &SelectedProxy,
+    target: &Target,
+    address: std::net::SocketAddr,
+    operation_timeout: Duration,
+) -> std::io::Result<(BoxedIo, Option<u16>)> {
+    open_proxy_stream_with_roots(proxy, target, address, operation_timeout, default_roots()).await
+}
+
+async fn open_proxy_stream_with_roots(
+    proxy: &SelectedProxy,
+    target: &Target,
+    address: std::net::SocketAddr,
+    operation_timeout: Duration,
+    proxy_roots: RootCertStore,
+) -> std::io::Result<(BoxedIo, Option<u16>)> {
+    let tcp = timeout(operation_timeout, TcpStream::connect(address))
+        .await
+        .map_err(|_| Error::new(ErrorKind::TimedOut, "proxy TCP connection timed out"))??;
+    let mut stream: BoxedIo = if proxy.scheme() == "https" {
+        let server_name = ServerName::try_from(proxy.host().to_owned()).map_err(|error| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid proxy TLS server name: {error}"),
+            )
+        })?;
+        let tls = timeout(
+            operation_timeout,
+            tls_connector(proxy_roots).connect(server_name, tcp),
+        )
+        .await
+        .map_err(|_| Error::new(ErrorKind::TimedOut, "proxy TLS handshake timed out"))?
+        .map_err(|error| Error::other(format!("proxy TLS handshake failed: {error}")))?;
+        Box::new(tls)
+    } else {
+        Box::new(tcp)
+    };
+
+    match proxy.scheme() {
+        "http" | "https" if target.scheme != "http" => {
+            let status = http_connect(
+                &mut stream,
+                target,
+                basic_authorization(proxy).as_deref(),
+                operation_timeout,
+            )
+            .await?;
+            Ok((stream, Some(status)))
+        }
+        "socks5" | "socks5h" => {
+            socks5_connect(&mut stream, proxy, target, operation_timeout).await?;
+            Ok((stream, None))
+        }
+        "http" | "https" => Ok((stream, None)),
+        _ => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "unsupported proxy scheme",
+        )),
+    }
+}
+
+async fn http_connect(
+    stream: &mut BoxedIo,
+    target: &Target,
+    authorization: Option<&str>,
+    operation_timeout: Duration,
+) -> std::io::Result<u16> {
+    let authority = target.connection_authority();
+    let authorization = authorization
+        .map(|value| format!("Proxy-Authorization: {value}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: netwhy/{}\r\n{authorization}Connection: keep-alive\r\n\r\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    timeout(operation_timeout, async {
+        stream.write_all(request.as_bytes()).await?;
+        stream.flush().await?;
+        let mut reader = BufReader::new(stream);
+        let line = read_crlf_line(&mut reader, MAX_STATUS_LINE_BYTES).await?;
+        let (_, status) = parse_http_status_line(&line)?;
+        drain_headers(&mut reader).await?;
+        if !(200..300).contains(&status) {
+            return Err(Error::new(
+                ErrorKind::ConnectionRefused,
+                HttpConnectStatusError(status),
+            ));
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|_| Error::new(ErrorKind::TimedOut, "proxy CONNECT timed out"))?
+}
+
+async fn socks5_connect(
+    stream: &mut BoxedIo,
+    proxy: &SelectedProxy,
+    target: &Target,
+    operation_timeout: Duration,
+) -> std::io::Result<()> {
+    timeout(operation_timeout, async {
+        socks5_authenticate(stream, proxy.credentials()).await?;
+        let request = socks5_request(proxy, target).await?;
+        stream.write_all(&request).await?;
+        stream.flush().await?;
+        read_socks5_response(stream).await
+    })
+    .await
+    .map_err(|_| Error::new(ErrorKind::TimedOut, "SOCKS5 negotiation timed out"))?
+}
+
+async fn socks5_authenticate(
+    stream: &mut BoxedIo,
+    credentials: Option<(String, String)>,
+) -> std::io::Result<()> {
+    let method = if credentials.is_some() { 0x02 } else { 0x00 };
+    stream.write_all(&[0x05, 0x01, method]).await?;
+    stream.flush().await?;
+    let mut greeting = [0_u8; 2];
+    stream.read_exact(&mut greeting).await?;
+    if greeting != [0x05, method] {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "SOCKS5 proxy rejected the offered authentication method",
+        ));
+    }
+    let Some((username, password)) = credentials else {
+        return Ok(());
+    };
+    let username = username.as_bytes();
+    let password = password.as_bytes();
+    let username_len = u8::try_from(username.len()).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "SOCKS5 username exceeds the 255-byte protocol limit",
+        )
+    })?;
+    let password_len = u8::try_from(password.len()).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "SOCKS5 password exceeds the 255-byte protocol limit",
+        )
+    })?;
+    let mut request = Vec::with_capacity(username.len() + password.len() + 3);
+    request.extend_from_slice(&[0x01, username_len]);
+    request.extend_from_slice(username);
+    request.push(password_len);
+    request.extend_from_slice(password);
+    stream.write_all(&request).await?;
+    stream.flush().await?;
+    let mut response = [0_u8; 2];
+    stream.read_exact(&mut response).await?;
+    if response != [0x01, 0x00] {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "SOCKS5 username/password authentication failed",
+        ));
+    }
+    Ok(())
+}
+
+async fn socks5_request(proxy: &SelectedProxy, target: &Target) -> std::io::Result<Vec<u8>> {
+    let mut request = vec![0x05, 0x01, 0x00];
+    let destination = if proxy.scheme() == "socks5" {
+        if let Some(address) = target.literal_address.map(|address| address.ip()) {
+            if !proxy.allows_ip(address) {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "the SOCKS5 destination is excluded by the selected address family",
+                ));
+            }
+            address
+        } else {
+            lookup_host((target.host.as_str(), target.port))
+                .await?
+                .find(|address| proxy.allows_ip(address.ip()))
+                .map(|address| address.ip())
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::NotFound,
+                        "local DNS returned no address for the SOCKS5 destination",
+                    )
+                })?
+        }
+    } else {
+        let host = target.host.as_bytes();
+        let host_len = u8::try_from(host.len()).map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "SOCKS5 destination hostname exceeds 255 bytes",
+            )
+        })?;
+        request.extend_from_slice(&[0x03, host_len]);
+        request.extend_from_slice(host);
+        request.extend_from_slice(&target.port.to_be_bytes());
+        return Ok(request);
+    };
+    match destination {
+        std::net::IpAddr::V4(address) => {
+            request.push(0x01);
+            request.extend_from_slice(&address.octets());
+        }
+        std::net::IpAddr::V6(address) => {
+            request.push(0x04);
+            request.extend_from_slice(&address.octets());
+        }
+    }
+    request.extend_from_slice(&target.port.to_be_bytes());
+    Ok(request)
+}
+
+async fn read_socks5_response(stream: &mut BoxedIo) -> std::io::Result<()> {
+    let mut header = [0_u8; 4];
+    stream.read_exact(&mut header).await?;
+    if header[0] != 0x05 || header[1] != 0x00 {
+        return Err(Error::new(
+            ErrorKind::ConnectionRefused,
+            format!("SOCKS5 CONNECT failed with status {}", header[1]),
+        ));
+    }
+    let address_bytes = match header[3] {
+        0x01 => 4,
+        0x04 => 16,
+        0x03 => usize::from(stream.read_u8().await?),
+        _ => {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "SOCKS5 proxy returned an invalid address type",
+            ));
+        }
+    };
+    let mut remainder = vec![0_u8; address_bytes + 2];
+    stream.read_exact(&mut remainder).await?;
+    Ok(())
+}
+
+async fn probe_https_stream(
+    target: &Target,
+    address: std::net::SocketAddr,
+    connect: ApplicationConnectResult,
+    stream: BoxedIo,
+    operation_timeout: Duration,
+) -> ApplicationReport {
+    let trust_source = "mozilla_webpki_roots";
+    let server_name = match ServerName::try_from(target.host.clone()) {
+        Ok(name) => name,
+        Err(error) => {
+            return tls_failure(
+                address,
+                connect,
+                0,
+                trust_source,
+                format!("invalid TLS server name: {error}"),
+            );
+        }
+    };
+    let handshake_started = std::time::Instant::now();
+    let mut tls_stream = match timeout(
+        operation_timeout,
+        tls_connector(default_roots()).connect(server_name, stream),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            return tls_failure(
+                address,
+                connect,
+                handshake_started.elapsed().as_millis(),
+                trust_source,
+                error.to_string(),
+            );
+        }
+        Err(_) => {
+            return tls_failure(
+                address,
+                connect,
+                handshake_started.elapsed().as_millis(),
+                trust_source,
+                format!(
+                    "TLS handshake timed out after {} ms",
+                    operation_timeout.as_millis()
+                ),
+            );
+        }
+    };
+    let handshake_ms = handshake_started.elapsed().as_millis();
+    let connection = &tls_stream.get_ref().1;
+    let version = connection
+        .protocol_version()
+        .map(|value| format!("{value:?}"));
+    let cipher_suite = connection
+        .negotiated_cipher_suite()
+        .map(|value| format!("{:?}", value.suite()));
+    let peer_certificates = certificate_details(connection.peer_certificates());
+    let http = http_exchange(&mut tls_stream, target, operation_timeout).await;
+    ApplicationReport {
+        status: http.status,
+        protocol: "https".to_owned(),
+        address,
+        connect,
+        tls: Some(TlsResult {
+            status: Status::Pass,
+            handshake_ms,
+            trust_source: trust_source.to_owned(),
+            version,
+            cipher_suite,
+            peer_certificates,
+            error: None,
+        }),
+        http: Some(http),
+    }
+}
+
 async fn probe_https(
     target: &Target,
     address: std::net::SocketAddr,
     operation_timeout: Duration,
 ) -> ApplicationReport {
-    let roots = webpki_roots::TLS_SERVER_ROOTS
-        .iter()
-        .cloned()
-        .collect::<RootCertStore>();
+    let roots = default_roots();
     probe_https_with_roots_and_source(
         target,
         address,
@@ -73,6 +567,13 @@ async fn probe_https(
         "mozilla_webpki_roots",
     )
     .await
+}
+
+fn default_roots() -> RootCertStore {
+    webpki_roots::TLS_SERVER_ROOTS
+        .iter()
+        .cloned()
+        .collect::<RootCertStore>()
 }
 
 #[cfg(test)]
@@ -191,6 +692,7 @@ where
     let cipher_suite = connection
         .negotiated_cipher_suite()
         .map(|value| format!("{:?}", value.suite()));
+    let peer_certificates = certificate_details(connection.peer_certificates());
 
     let http = http_exchange(&mut tls_stream, target, operation_timeout).await;
     let status = http.status;
@@ -205,6 +707,7 @@ where
             trust_source: trust_source.to_owned(),
             version,
             cipher_suite,
+            peer_certificates,
             error: None,
         }),
         http: Some(http),
@@ -282,13 +785,45 @@ async fn http_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let started = std::time::Instant::now();
     let request = format!(
         "HEAD {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: netwhy/{}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         target.request_path(),
         target.host_header(),
         env!("CARGO_PKG_VERSION")
     );
+    http_exchange_with_request(stream, request, operation_timeout).await
+}
+
+async fn http_exchange_proxy<S>(
+    stream: &mut S,
+    target: &Target,
+    authorization: Option<&str>,
+    operation_timeout: Duration,
+) -> HttpResult
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let authorization = authorization
+        .map(|value| format!("Proxy-Authorization: {value}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "HEAD {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: netwhy/{}\r\nAccept: */*\r\n{authorization}Connection: close\r\n\r\n",
+        target.proxy_request_uri(),
+        target.host_header(),
+        env!("CARGO_PKG_VERSION")
+    );
+    http_exchange_with_request(stream, request, operation_timeout).await
+}
+
+async fn http_exchange_with_request<S>(
+    stream: &mut S,
+    request: String,
+    operation_timeout: Duration,
+) -> HttpResult
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let started = std::time::Instant::now();
 
     let exchange = async {
         stream.write_all(request.as_bytes()).await?;
@@ -452,10 +987,86 @@ fn tls_failure(
             trust_source: trust_source.to_owned(),
             version: None,
             cipher_suite: None,
+            peer_certificates: Vec::new(),
             error: Some(sanitize_report_text(error)),
         }),
         http: None,
     }
+}
+
+fn certificate_details(
+    certificates: Option<&[rustls::pki_types::CertificateDer<'_>]>,
+) -> Vec<CertificateInfo> {
+    certificates
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(position, certificate)| {
+            let bytes = certificate.as_ref();
+            let sha256 = Sha256::digest(bytes).iter().fold(
+                String::with_capacity(64),
+                |mut fingerprint, byte| {
+                    let _ = write!(fingerprint, "{byte:02x}");
+                    fingerprint
+                },
+            );
+            let parsed = x509_parser::parse_x509_certificate(bytes)
+                .ok()
+                .map(|(_, value)| value);
+            let mut dns_names = Vec::new();
+            let mut ip_addresses = Vec::new();
+            if let Some(parsed) = &parsed {
+                if let Ok(Some(names)) = parsed.subject_alternative_name() {
+                    for name in &names.value.general_names {
+                        match name {
+                            x509_parser::extensions::GeneralName::DNSName(value) => {
+                                dns_names.push(sanitize_report_text(value));
+                            }
+                            x509_parser::extensions::GeneralName::IPAddress(bytes) => {
+                                let address = match bytes.len() {
+                                    4 => <[u8; 4]>::try_from(*bytes)
+                                        .ok()
+                                        .map(std::net::Ipv4Addr::from)
+                                        .map(std::net::IpAddr::V4),
+                                    16 => <[u8; 16]>::try_from(*bytes)
+                                        .ok()
+                                        .map(std::net::Ipv6Addr::from)
+                                        .map(std::net::IpAddr::V6),
+                                    _ => None,
+                                };
+                                if let Some(address) = address {
+                                    ip_addresses.push(address.to_string());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            CertificateInfo {
+                position,
+                der_bytes: bytes.len(),
+                sha256,
+                subject: parsed
+                    .as_ref()
+                    .map(|value| sanitize_report_text(value.subject().to_string())),
+                issuer: parsed
+                    .as_ref()
+                    .map(|value| sanitize_report_text(value.issuer().to_string())),
+                serial_number: parsed
+                    .as_ref()
+                    .map(|value| sanitize_report_text(value.raw_serial_as_string())),
+                not_before_unix: parsed
+                    .as_ref()
+                    .map(|value| value.validity().not_before.timestamp()),
+                not_after_unix: parsed
+                    .as_ref()
+                    .map(|value| value.validity().not_after.timestamp()),
+                dns_names,
+                ip_addresses,
+            }
+        })
+        .collect()
 }
 
 fn successful_connect(duration_ms: u128) -> ApplicationConnectResult {
@@ -510,11 +1121,13 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
 
     use super::{
-        http_exchange, probe, probe_http, probe_http_with_connection, probe_https_with_connection,
-        probe_https_with_roots,
+        http_exchange, http_exchange_proxy, open_proxy_stream_with_roots, probe, probe_http,
+        probe_http_with_connection, probe_https_with_connection, probe_https_with_roots,
+        probe_via_proxy,
     };
     use crate::{
         model::{AddressFamily, Status, TcpResult},
+        proxy::SelectedProxy,
         target::Target,
     };
 
@@ -545,6 +1158,71 @@ mod tests {
 
         assert_eq!(result.status, Status::Pass);
         assert_eq!(result.http.unwrap().status_code, Some(204));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn treats_forward_proxy_407_as_a_proxy_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut stream = accept_with_timeout(&listener).await;
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let proxy = SelectedProxy {
+            url: url::Url::parse(&format!("http://{address}")).unwrap(),
+            redacted_url: format!("http://{address}/"),
+            addresses: vec![address],
+            address_family: crate::model::AddressFamilySelection::Any,
+        };
+        let target = Target::parse("http://example.test/").unwrap();
+
+        let (applications, evidence) =
+            probe_via_proxy(&target, &proxy, Duration::from_secs(1)).await;
+
+        assert_eq!(evidence.status, Status::Fail);
+        assert_eq!(evidence.attempts[0].status, Status::Fail);
+        assert_eq!(
+            evidence.attempts[0].error_kind.as_deref(),
+            Some("permission_denied")
+        );
+        assert_eq!(
+            applications[0].http.as_ref().unwrap().status_code,
+            Some(407)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preserves_failed_connect_status_in_proxy_evidence() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut stream = accept_with_timeout(&listener).await;
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let proxy = SelectedProxy {
+            url: url::Url::parse(&format!("http://{address}")).unwrap(),
+            redacted_url: format!("http://{address}/"),
+            addresses: vec![address],
+            address_family: crate::model::AddressFamilySelection::Any,
+        };
+        let target = Target::parse("tcp://example.test:443").unwrap();
+
+        let (_, evidence) = probe_via_proxy(&target, &proxy, Duration::from_secs(1)).await;
+
+        assert_eq!(evidence.status, Status::Fail);
+        assert_eq!(evidence.attempts[0].tunnel_status, Some(407));
         server.await.unwrap();
     }
 
@@ -587,7 +1265,85 @@ mod tests {
         let tls = result.tls.unwrap();
         assert_eq!(tls.status, Status::Pass);
         assert_eq!(tls.trust_source, "custom_roots");
+        assert_eq!(tls.peer_certificates.len(), 1);
+        assert_eq!(tls.peer_certificates[0].sha256.len(), 64);
+        assert!(
+            tls.peer_certificates[0]
+                .dns_names
+                .iter()
+                .any(|name| name == "localhost")
+        );
+        assert!(tls.peer_certificates[0].not_after_unix.is_some());
         assert_eq!(result.http.unwrap().status_code, Some(200));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sends_absolute_http_requests_over_a_trusted_https_proxy() {
+        let cert_der = CertificateDer::from_pem_slice(include_bytes!(
+            "../../tests/fixtures/tls/localhost-cert.pem"
+        ))
+        .unwrap();
+        let private_key = PrivateKeyDer::from_pem_slice(include_bytes!(
+            "../../tests/fixtures/tls/localhost-key.pem"
+        ))
+        .unwrap();
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], private_key)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let stream = accept_with_timeout(&listener).await;
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0, "proxy request ended before its headers");
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(request.len() < 16 * 1024, "proxy request was not bounded");
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(
+                request.starts_with("HEAD http://example.test:8080/health?ready=1 HTTP/1.1\r\n")
+            );
+            assert!(request.contains("\r\nHost: example.test:8080\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let proxy = SelectedProxy {
+            url: url::Url::parse(&format!("https://localhost:{}", address.port())).unwrap(),
+            redacted_url: format!("https://localhost:{}/", address.port()),
+            addresses: vec![address],
+            address_family: crate::model::AddressFamilySelection::Any,
+        };
+        let target = Target::parse("http://example.test:8080/health?ready=1").unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(cert_der).unwrap();
+        let (mut stream, tunnel_status) = Box::pin(open_proxy_stream_with_roots(
+            &proxy,
+            &target,
+            address,
+            Duration::from_secs(1),
+            roots,
+        ))
+        .await
+        .unwrap();
+
+        let result = http_exchange_proxy(&mut stream, &target, None, Duration::from_secs(1)).await;
+
+        assert_eq!(tunnel_status, None);
+        assert_eq!(result.status, Status::Pass);
+        assert_eq!(result.status_code, Some(204));
         server.await.unwrap();
     }
 

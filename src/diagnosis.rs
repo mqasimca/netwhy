@@ -6,6 +6,12 @@ pub fn explain(report: &mut DiagnosticReport) {
     let mut suggestions = Vec::new();
     let notes = context_notes(report);
 
+    if report.request.proxy_mode != "direct" && !report.proxy_transport.bypassed {
+        explain_proxy_result(report, &mut suggestions);
+        finish(report, suggestions, notes);
+        return;
+    }
+
     if report.dns.status == Status::Fail {
         diagnose_dns_failure(report, &mut suggestions);
         finish(report, suggestions, notes);
@@ -77,6 +83,79 @@ pub fn explain(report: &mut DiagnosticReport) {
     finish(report, suggestions, notes);
 }
 
+fn explain_proxy_result(report: &mut DiagnosticReport, suggestions: &mut Vec<String>) {
+    let proxy_auth_rejected = report.proxy_transport.status == Status::Fail
+        && report.application_attempts.iter().any(|application| {
+            application.http.as_ref().and_then(|http| http.status_code) == Some(407)
+        });
+    if proxy_auth_rejected {
+        report.overall = Status::Fail;
+        report.diagnosis.code = DiagnosisCode::ProxyConnectionFailed;
+        set_summary(
+            report,
+            "The selected proxy rejected the request with HTTP 407.",
+        );
+        report.diagnosis.likely_cause = Some(
+            "the proxy requires authentication or rejected the supplied credentials".to_owned(),
+        );
+        suggestions.push(
+            "Verify the proxy credentials and authentication method, then retry the request."
+                .to_owned(),
+        );
+        return;
+    }
+    if report.proxy_transport.status == Status::Fail && report.application_attempts.is_empty() {
+        report.overall = Status::Fail;
+        report.diagnosis.code = DiagnosisCode::ProxyConnectionFailed;
+        set_summary(
+            report,
+            "The selected proxy transport could not be prepared.",
+        );
+        report.diagnosis.likely_cause = report.proxy_transport.error.clone();
+        suggestions.push(
+            "Check the selected proxy URL, resolver, credentials, NO_PROXY rules, and proxy availability."
+                .to_owned(),
+        );
+        return;
+    }
+    let application_failed = !report.application_attempts.is_empty()
+        && report
+            .application_attempts
+            .iter()
+            .all(|application| application.status == Status::Fail);
+    if application_failed {
+        let only_connect_failures = report
+            .application_attempts
+            .iter()
+            .all(|application| application.connect.status == Status::Fail);
+        if only_connect_failures {
+            report.overall = Status::Fail;
+            report.diagnosis.code = DiagnosisCode::ProxyConnectionFailed;
+            set_summary(report, "Every proxy connection attempt failed.");
+            report.diagnosis.likely_cause = report
+                .application_attempts
+                .iter()
+                .find_map(|application| application.connect.error.clone());
+            suggestions.push(
+                "Verify proxy reachability, authentication, CONNECT policy, and the configured proxy scheme."
+                    .to_owned(),
+            );
+        } else {
+            diagnose_application_failure(report, suggestions);
+        }
+        return;
+    }
+    if diagnose_http_error(report, suggestions) {
+        return;
+    }
+    report.overall = Status::Pass;
+    report.diagnosis.code = DiagnosisCode::ConnectivityOk;
+    set_summary(
+        report,
+        "The target is reachable through the selected proxy transport.",
+    );
+}
+
 fn context_notes(report: &DiagnosticReport) -> Vec<String> {
     let mut notes = Vec::new();
     if report.request.execution_context.proxy_environment == ProxyEnvironmentStatus::Unavailable {
@@ -94,9 +173,9 @@ fn context_notes(report: &DiagnosticReport) -> Vec<String> {
                 ),
         );
     }
-    if !report.proxies.is_empty() {
+    if !report.proxies.is_empty() && report.request.proxy_mode == "direct" {
         notes.push(
-            "Proxy environment variables are set; this version tests the target directly and bypasses HTTP proxies."
+            "Proxy environment variables are set; direct mode bypassed them. Use --proxy-mode environment to test through the selected proxy."
                 .to_owned(),
         );
     }
@@ -117,6 +196,45 @@ fn context_notes(report: &DiagnosticReport) -> Vec<String> {
         notes.push(format!(
             "The selected route uses a tunnel or VPN interface: {}.",
             interfaces.join(", ")
+        ));
+    }
+    if report.path_evidence.network_manager.vpn_active {
+        notes.push("NetworkManager reports an active VPN or tunnel connection.".to_owned());
+    }
+    for mtu in report
+        .path_evidence
+        .mtu
+        .iter()
+        .filter(|evidence| evidence.status == Status::Warn)
+    {
+        notes.push(format!(
+            "Path MTU for {} is lower than the selected route MTU or protocol minimum.",
+            mtu.address.ip()
+        ));
+    }
+    for rule in report.path_evidence.firewall.matches.iter().filter(|rule| {
+        rule.confidence == "exact"
+            && (rule.verdict == "drop" || rule.verdict == "reject" || rule.verdict == "policy:drop")
+    }) {
+        notes.push(format!(
+            "Read-only nftables analysis found an applicable {} verdict in {}/{}.",
+            rule.verdict, rule.table, rule.chain
+        ));
+    }
+    for plugin in report
+        .plugins
+        .iter()
+        .filter(|plugin| matches!(plugin.status, Status::Warn | Status::Fail))
+    {
+        notes.push(format!(
+            "Plugin {} reported {}: {}",
+            plugin.name,
+            if plugin.status == Status::Warn {
+                "a warning"
+            } else {
+                "a failure"
+            },
+            plugin.summary
         ));
     }
     notes
@@ -421,8 +539,8 @@ mod tests {
     use crate::model::{
         AddressFamily, AddressFamilySelection, ApplicationConnectResult, ApplicationReport,
         Diagnosis, DiagnosisCode, DiagnosticReport, DnsResult, ExecutionContextInfo, HttpResult,
-        ProxyEnvironmentStatus, ProxyVariable, RequestInfo, RouteResult, Status, TargetReport,
-        TcpResult, TlsResult, ToolInfo,
+        ProxyEnvironmentStatus, ProxyTransportEvidence, ProxyVariable, RequestInfo, RouteResult,
+        Status, TargetReport, TcpResult, TlsResult, ToolInfo,
     };
 
     #[test]
@@ -486,6 +604,43 @@ mod tests {
                 .is_some_and(|cause| cause.contains("no usable address"))
         );
         assert_eq!(report.diagnosis.notes.len(), 2);
+    }
+
+    #[test]
+    fn classifies_forward_proxy_authentication_rejection_as_failure() {
+        let address = "192.0.2.1:8080".parse().unwrap();
+        let mut report = report_with_tcp(Vec::new());
+        report.request.proxy_mode = "explicit".to_owned();
+        report.proxy_transport = ProxyTransportEvidence {
+            status: Status::Fail,
+            mode: "proxy".to_owned(),
+            ..ProxyTransportEvidence::default()
+        };
+        report.application_attempts = vec![ApplicationReport {
+            status: Status::Warn,
+            protocol: "http".to_owned(),
+            address,
+            connect: ApplicationConnectResult {
+                status: Status::Pass,
+                duration_ms: 1,
+                error_kind: None,
+                error: None,
+            },
+            tls: None,
+            http: Some(HttpResult {
+                status: Status::Warn,
+                duration_ms: 1,
+                status_code: Some(407),
+                status_line: Some("HTTP/1.1 407 Proxy Authentication Required".to_owned()),
+                error: None,
+            }),
+        }];
+
+        explain(&mut report);
+
+        assert_eq!(report.overall, Status::Fail);
+        assert_eq!(report.diagnosis.code, DiagnosisCode::ProxyConnectionFailed);
+        assert_eq!(report.exit_code, 1);
     }
 
     #[test]
@@ -821,12 +976,14 @@ mod tests {
                 interface: Some("eth0".to_owned()),
                 gateway: None,
                 source: None,
+                mtu: None,
+                advmss: None,
                 error_kind: None,
                 error: None,
             })
             .collect();
         DiagnosticReport {
-            schema_version: 1,
+            schema_version: crate::model::SCHEMA_VERSION,
             kind: "diagnostic_report".to_owned(),
             tool: ToolInfo::current(),
             generated_at_unix_ms: 0,
@@ -835,7 +992,8 @@ mod tests {
                 timeout_ms: 3_000,
                 address_family: AddressFamilySelection::Any,
                 application_transport: "direct".to_owned(),
-                proxy_mode: "detect_only".to_owned(),
+                proxy_mode: "direct".to_owned(),
+                redaction: "standard".to_owned(),
                 execution_context: ExecutionContextInfo::current(),
             },
             target: TargetReport {
@@ -857,6 +1015,9 @@ mod tests {
             tcp,
             application_attempts: Vec::new(),
             proxies: Vec::new(),
+            proxy_transport: crate::model::ProxyTransportEvidence::default(),
+            path_evidence: crate::model::PathEvidence::default(),
+            plugins: Vec::new(),
             diagnosis: Diagnosis::default(),
             overall: Status::Skip,
             exit_code: 2,
@@ -922,6 +1083,7 @@ mod tests {
                 trust_source: "test_roots".to_owned(),
                 version: None,
                 cipher_suite: None,
+                peer_certificates: Vec::new(),
                 error: Some("certificate rejected".to_owned()),
             }),
             http: None,
@@ -945,6 +1107,7 @@ mod tests {
                 trust_source: "test_roots".to_owned(),
                 version: Some("TLSv1_3".to_owned()),
                 cipher_suite: Some("TLS13_AES_256_GCM_SHA384".to_owned()),
+                peer_certificates: Vec::new(),
                 error: None,
             }),
             http: Some(HttpResult {

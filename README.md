@@ -24,7 +24,7 @@ Evidence:
 ```
 
 > [!IMPORTANT]
-> NetWhy is an unpublished v0.1 development build. The documented v0.1 interface is implemented and tested locally, but no release has been published.
+> NetWhy is an unpublished development build. The feature roadmap through v0.4 is implemented in this tree, but native Ubuntu, Fedora/rootless Podman, and Apple Silicon qualification must still be completed before publication.
 
 ## Principles
 
@@ -41,19 +41,22 @@ Evidence:
 - **Apple Silicon macOS (`aarch64-apple-darwin`):** local DNS, native route, TCP, TLS, and HTTP diagnosis. Linux execution-context selectors return a structured `CONTEXT_UNAVAILABLE` error instead of being ignored.
 - **Intel macOS and other operating systems:** unsupported.
 
-## v0.1 scope
+## Current scope
 
-The first release diagnoses a target from the current Linux network namespace:
+One run correlates the requested execution context and target across these layers:
 
 1. Resolve the hostname with the system resolver.
-2. Ask the kernel which route, interface, gateway, and source address it selects.
+2. Ask the kernel which route, interface, gateway, source address, MTU, and advertised MSS it selects.
 3. Test every retained address over TCP with bounded concurrency.
-4. For HTTPS, validate the TLS handshake and certificate using the requested hostname, retrying another TCP-successful address when necessary.
-5. For HTTP or HTTPS, send a `HEAD` request and safely read a bounded response status line.
-6. Explain the most likely failure and suggest focused follow-up checks.
-7. Produce outcome-first human output or a versioned, coded JSON report.
+4. Optionally connect through HTTP, HTTPS, SOCKS5, or SOCKS5H proxy transport.
+5. For HTTPS, validate the TLS handshake and certificate using the requested hostname and record bounded peer-certificate metadata.
+6. For HTTP or HTTPS, send a `HEAD` request and safely read a bounded response status line.
+7. On Linux, collect read-only nftables, path-MTU, address-preference, systemd-resolved, NetworkManager, and VPN evidence when the relevant tools are available.
+8. Incorporate explicitly selected, versioned evidence plugins.
+9. Explain the most likely failure and suggest focused follow-up checks.
+10. Produce outcome-first text, a shareable redacted report, or a structural comparison of two reports.
 
-The current development tree implements the v0.2 execution-context features on Linux and local diagnosis on Apple Silicon macOS. Cross-environment release qualification remains before v0.2 can be published. Firewall verdict tracing, MTU diagnosis, proxy execution, and report comparison remain deferred. See [the product roadmap](docs/product.md).
+Linux supports current-process, PID, local Docker, and local Podman contexts. Apple Silicon macOS supports local DNS, route, TCP, TLS, and HTTP diagnosis; Linux-only path collectors and context selectors report a structured skip or error. See [the product roadmap](docs/product.md) for implementation and release-gate status.
 
 ## Command contract
 
@@ -64,15 +67,20 @@ Arguments:
   <TARGET>  URL, hostname, IP address, or host:port
 
 Options:
-      --json                 Emit a versioned JSON report
-      --pid <PID>            Diagnose from the network, mount, root, and proxy context of a Linux process
-      --docker <CONTAINER>   Diagnose from a running container managed by a local Docker runtime (Linux only)
-      --podman <CONTAINER>   Diagnose from a running container managed by a local Podman runtime (Linux only)
-      --ipv4                 Test IPv4 addresses only
-      --ipv6                 Test IPv6 addresses only
-      --timeout-ms <MILLIS>  Per-operation DNS, route, TCP, TLS, and HTTP timeout [default: 3000]
-  -h, --help                 Print help
-  -V, --version              Print version
+      --json                    Emit a versioned JSON report
+      --pid <PID>               Select a Linux process context
+      --docker <CONTAINER>      Select a local Docker container context
+      --podman <CONTAINER>      Select a local Podman container context
+      --ipv4                    Test IPv4 only
+      --ipv6                    Test IPv6 only
+      --timeout-ms <MILLIS>     Per-operation timeout [default: 3000]
+      --proxy-mode <MODE>       direct or environment [default: direct]
+      --proxy-url <URL>         Explicit HTTP(S), SOCKS5, or SOCKS5H proxy
+      --plugin <PROGRAM>        Evidence plugin; repeatable up to eight times
+
+netwhy report [OPTIONS] <TARGET> [--redaction standard|strict]
+netwhy compare [--json] <LEFT.json> <RIGHT.json>
+netwhy completions <bash|elvish|fish|powershell|zsh>
 ```
 
 Target interpretation is intentionally predictable:
@@ -97,9 +105,11 @@ Exit codes:
 
 ## Safety and network behavior
 
-NetWhy does not mutate local configuration. It does perform active DNS, TCP, TLS, and optional HTTP `HEAD` probes, so it is not a passive observer.
+NetWhy does not mutate local configuration. It performs active DNS, TCP, optional tracepath, TLS, and HTTP `HEAD` probes, so it is not a passive observer. nftables inspection is static and read-only; NetWhy does not install tracing rules or claim packet-perfect firewall attribution.
 
-The application probe connects directly. Proxy-related environment variables are reported with credentials redacted, but are not used to transport the probe. This distinction is displayed in both human and JSON output.
+An explicitly selected evidence plugin is a separate executable and runs with NetWhy's operating-system privileges and execution context. Only use trusted plugins; NetWhy bounds their runtime and output but cannot make third-party code read-only.
+
+Direct application transport remains the default even when proxy variables exist. `--proxy-mode environment` selects `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` from the active execution context and honors exact host, domain suffix, port, IP, and CIDR `NO_PROXY` entries. `--proxy-url` selects an explicit proxy and takes precedence over environment selection. HTTP targets use absolute-form requests; HTTPS and raw TCP use HTTP `CONNECT`; HTTPS proxy URLs authenticate the proxy connection with TLS. SOCKS5 resolves the target locally, while SOCKS5H delegates target DNS to the proxy. `--ipv4` and `--ipv6` filter proxy endpoints and local SOCKS5 target DNS; a hostname with remote-resolving HTTP(S) or SOCKS5H transport is rejected when a family flag is set because the requested family cannot be guaranteed. Embedded HTTP Basic and SOCKS username/password credentials are supported and never serialized.
 
 `--pid <PID>` selects another Linux process as the execution context. NetWhy opens the target context before changing its own process, enters a differing mount namespace and filesystem root before a differing network namespace, and only then creates the async runtime. Shared namespaces and roots require no capabilities. Entering a differing namespace requires `CAP_SYS_ADMIN`; entering a differing root requires `CAP_SYS_CHROOT`. NetWhy never attaches to or mutates the selected process. If its proxy environment cannot be read, the report records that limitation and continues with the selected resolver and network context.
 
@@ -111,9 +121,9 @@ Rootless Podman owns its container namespaces from Podman's user namespace. Run 
 podman unshare netwhy --podman my-container https://example.com
 ```
 
-Route inspection uses `ip -j route get` on Linux and `/sbin/route -n get` on Apple Silicon macOS. Linux reports the interface, gateway, and preferred source when available; macOS reports the interface and gateway exposed by its native route utility. Each helper invocation is time-bounded, runs in an isolated process group, and retains at most 64 KiB from each output stream. If the platform route utility is missing, NetWhy skips that evidence and continues with real TCP attempts.
+Route inspection uses `ip -j route get` on Linux and `/sbin/route -n get` on Apple Silicon macOS. Linux additionally uses bounded `nft`, `tracepath`, `resolvectl`, and `nmcli` commands when installed. Every helper is shell-free, time-bounded, runs in an isolated process group, and has bounded output. Missing tools produce explicit `skip` evidence without suppressing network probes.
 
-Reports reject target URL credentials, redact target query strings and fragments, and record the effective timeout, address-family selection, application transport, execution context, required capabilities, and TLS trust source. DNS evidence is capped at 32 unique addresses to keep resource use predictable.
+Reports reject target URL credentials, redact target query strings and fragments, and record the effective timeout, address-family selection, application transport, execution context, required capabilities, and TLS trust source. `netwhy report --redaction strict` additionally applies deterministic pseudonyms to target, address, interface, process/container, certificate-identity, resolver, firewall, and plugin fields. DNS evidence is capped at 32 unique addresses to keep resource use predictable.
 
 ## Documentation
 
@@ -122,6 +132,9 @@ Reports reject target URL credentials, redact target query strings and fragments
 - [Human and agent output contract](docs/output-contract.md)
 - [JSON report schema](docs/report.schema.json)
 - [JSON error schema](docs/error.schema.json)
+- [JSON comparison schema](docs/compare.schema.json)
+- [Evidence plugin protocol](docs/plugin-protocol.md)
+- [Evidence plugin schema](docs/plugin.schema.json)
 
 ## Development
 
@@ -130,8 +143,8 @@ NetWhy requires Rust 1.85 or newer. Stable Rust is recommended. Supported build 
 ```bash
 cargo build
 make test-unit        # library, binary, and CLI parser unit tests
-make test-integration # in-process DNS/TCP/TLS/HTTP pipeline tests
-make test-cli         # compiled CLI, schema, exit-code, and process-context tests
+make test-integration # in-process direct/proxy DNS/TCP/TLS/HTTP pipeline tests
+make test-cli         # compiled commands, schemas, plugins, exit codes, and contexts
 make test             # the complete automated Rust test suite
 ```
 
@@ -147,7 +160,7 @@ The complete offline release gate is one command:
 make verify
 ```
 
-`make verify` runs `make check`, enforces coverage, tests with Rust 1.85, builds and verifies the Cargo package, and exercises staged installation, `--help`, `--version`, and uninstallation. It requires the Rust 1.85 toolchain and `cargo-llvm-cov`; it does not require a public network service.
+`make verify` runs `make check`, enforces coverage, tests with Rust 1.85, builds and verifies the Cargo package, validates Debian/RPM/Homebrew packaging templates, and exercises staged installation, `--help`, `--version`, and uninstallation. It requires the Rust 1.85 toolchain and `cargo-llvm-cov`; it does not require a public network service.
 
 The network-backed RustSec advisory audit is enforced separately in CI and before tagged releases. Run it locally with `cargo audit --file Cargo.lock` after installing `cargo-audit`.
 
@@ -169,6 +182,8 @@ cargo run -- --json does-not-exist.invalid
 cargo run -- --json --pid "$PID" https://example.com
 cargo run -- --json --docker my-container https://example.com
 cargo run -- --json --podman my-container https://example.com
+cargo run -- --proxy-mode environment https://example.com
+cargo run -- report --redaction strict https://example.com
 ```
 
 ## Local installation and packaging
@@ -198,6 +213,10 @@ Build a local Cargo package without requiring a commit:
 make package
 ```
 
+Tagged Linux releases also build Debian and RPM packages; Apple Silicon releases include a generated Homebrew formula. `make test-packaging` validates normal and prerelease template substitution without requiring package-builder tools.
+
+Generate a completion file with, for example, `netwhy completions zsh` or `netwhy completions bash`. Install the output using the completion directory documented by your shell or package manager.
+
 ## Creating a release
 
 Set the package version in `Cargo.toml`, update `Cargo.lock`, run `make verify`, and push the release commit. Then create and push a matching tag:
@@ -210,7 +229,9 @@ git push origin v0.2.0
 The release workflow requires the tag to exactly match the package version. It runs the complete Linux release gate and native Apple Silicon tests before creating or updating the GitHub Release for that tag with these assets:
 
 - `netwhy-v<VERSION>-x86_64-unknown-linux-gnu.tar.gz` and its SHA-256 checksum;
-- `netwhy-v<VERSION>-aarch64-apple-darwin.tar.gz` and its SHA-256 checksum.
+- `netwhy-v<VERSION>-aarch64-apple-darwin.tar.gz` and its SHA-256 checksum;
+- an amd64 Debian package, x86_64 RPM, and package checksum file;
+- `netwhy.rb`, a Homebrew formula for the Apple Silicon archive.
 
 Each archive contains the release binary, `README.md`, and `LICENSE`. Rerunning the workflow replaces matching assets, while a prerelease package version such as `0.2.0-rc.1` creates a prerelease.
 

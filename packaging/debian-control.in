@@ -1,0 +1,10 @@
+Package: netwhy
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: @ARCH@
+Maintainer: NetWhy maintainers <maintainers@netwhy.dev>
+Homepage: https://github.com/mqasimca/netwhy
+Description: Explain why a network connection succeeds or fails
+ NetWhy correlates DNS, route, TCP, TLS, HTTP, proxy, firewall, MTU,
+ resolver, and execution-context evidence into a deterministic diagnosis.

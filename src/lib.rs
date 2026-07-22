@@ -2,37 +2,57 @@
 compile_error!("NetWhy supports Linux and Apple Silicon macOS targets");
 
 pub mod cli;
+mod command;
+pub mod compare;
 mod diagnosis;
 mod model;
 pub mod output;
+mod plugin;
 mod probe;
+mod proxy;
+pub mod redaction;
 mod target;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use cli::Cli;
+use cli::{Cli, ProxyMode};
 use model::{
     AddressFamilySelection, ProxyVariable, RequestInfo, SCHEMA_VERSION, TargetReport, ToolInfo,
 };
 pub use model::{
-    CapabilityStatus, ContextRelation, DiagnosisCode, DiagnosticReport, ErrorCode, ErrorReport,
-    ExecutionContextInfo, ExecutionContextSource, ProxyEnvironmentStatus, Status,
+    CapabilityStatus, ComparisonReport, ContextRelation, DiagnosisCode, DiagnosticReport,
+    ErrorCode, ErrorReport, ExecutionContextInfo, ExecutionContextSource, ProxyEnvironmentStatus,
+    Status,
 };
 use target::Target;
+
+/// Validate diagnostic options that require checks beyond Clap's field-level parsing.
+///
+/// # Errors
+///
+/// Returns an error for an invalid explicit proxy URL or too many plugin programs.
+pub fn validate_options(cli: &Cli) -> Result<()> {
+    plugin::validate_programs(&cli.plugin)?;
+    proxy::validate_args(&cli.diagnostic)?;
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct DiagnosticContext {
     execution: ExecutionContextInfo,
     proxies: Vec<ProxyVariable>,
+    proxy_environment: Vec<(String, String)>,
 }
 
 impl DiagnosticContext {
     #[must_use]
     pub fn current() -> Self {
+        let proxy_environment = proxy_environment_from_lookup(|name| std::env::var(name).ok());
         Self {
             execution: ExecutionContextInfo::current(),
-            proxies: proxy_variables(),
+            proxies: report_proxy_variables(&proxy_environment),
+            proxy_environment,
         }
     }
 
@@ -41,14 +61,16 @@ impl DiagnosticContext {
         execution: ExecutionContextInfo,
         environment: &[(String, String)],
     ) -> Self {
+        let proxy_environment = proxy_environment_from_lookup(|name| {
+            environment
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .map(|(_, value)| value.clone())
+        });
         Self {
             execution,
-            proxies: proxy_variables_from_lookup(|name| {
-                environment
-                    .iter()
-                    .find(|(candidate, _)| candidate == name)
-                    .map(|(_, value)| value.clone())
-            }),
+            proxies: report_proxy_variables(&proxy_environment),
+            proxy_environment,
         }
     }
 
@@ -56,17 +78,19 @@ impl DiagnosticContext {
     /// Only recognized proxy variables are retained.
     #[must_use]
     pub fn selected_process_environ(execution: ExecutionContextInfo, environment: &[u8]) -> Self {
+        let proxy_environment = proxy_environment_from_lookup(|name| {
+            environment.split(|byte| *byte == 0).find_map(|entry| {
+                let separator = entry.iter().position(|byte| *byte == b'=')?;
+                let (candidate, value) = entry.split_at(separator);
+                let value = value.get(1..)?;
+                (candidate == name.as_bytes())
+                    .then(|| std::str::from_utf8(value).ok().map(ToOwned::to_owned))?
+            })
+        });
         Self {
             execution,
-            proxies: proxy_variables_from_lookup(|name| {
-                environment.split(|byte| *byte == 0).find_map(|entry| {
-                    let separator = entry.iter().position(|byte| *byte == b'=')?;
-                    let (candidate, value) = entry.split_at(separator);
-                    let value = value.get(1..)?;
-                    (candidate == name.as_bytes())
-                        .then(|| std::str::from_utf8(value).ok().map(ToOwned::to_owned))?
-                })
-            }),
+            proxies: report_proxy_variables(&proxy_environment),
+            proxy_environment,
         }
     }
 
@@ -82,7 +106,7 @@ impl DiagnosticContext {
 ///
 /// Returns an error when the target is empty, malformed, or uses an unsupported scheme.
 pub async fn diagnose(cli: &Cli) -> Result<DiagnosticReport> {
-    diagnose_with_context(cli, DiagnosticContext::current()).await
+    Box::pin(diagnose_with_context(cli, DiagnosticContext::current())).await
 }
 
 /// Run every diagnostic stage using an explicitly selected execution context.
@@ -95,13 +119,58 @@ pub async fn diagnose_with_context(
     context: DiagnosticContext,
 ) -> Result<DiagnosticReport> {
     let started = Instant::now();
+    validate_options(cli)?;
     let target = Target::parse(&cli.target)?;
     let timeout = Duration::from_millis(cli.timeout_ms);
 
     let dns = probe::dns::resolve(&target, cli.ipv4, cli.ipv6, timeout).await;
-    let routes = probe::route::inspect_all(&dns.addresses, timeout).await;
-    let tcp = probe::tcp::connect_all(&dns.addresses, timeout).await;
-    let application_attempts = probe::application::probe(&target, &tcp, timeout).await;
+    let (routes, tcp, proxy_plan) = tokio::join!(
+        probe::route::inspect_all(&dns.addresses, timeout),
+        probe::tcp::connect_all(&dns.addresses, timeout),
+        proxy::plan(
+            &cli.diagnostic,
+            &target,
+            &context.proxy_environment,
+            timeout
+        ),
+    );
+    let proxy_plan = proxy_plan?;
+    let application_future = async {
+        match &proxy_plan {
+            proxy::ProxyPlan::Direct(_) => (
+                probe::application::probe(&target, &tcp, timeout).await,
+                None,
+            ),
+            proxy::ProxyPlan::Proxy(proxy) => {
+                let (attempts, evidence) =
+                    probe::application::probe_via_proxy(&target, proxy, timeout).await;
+                (attempts, Some(evidence))
+            }
+            proxy::ProxyPlan::Unavailable(_) => (Vec::new(), None),
+        }
+    };
+    let (path_evidence, plugins, (application_attempts, proxy_probe)) = tokio::join!(
+        probe::path::collect(&dns.addresses, &routes, timeout),
+        plugin::collect(&cli.plugin, &target, timeout),
+        application_future,
+    );
+    let plugins = plugins?;
+    let proxy_transport = proxy_probe.unwrap_or_else(|| match proxy_plan {
+        proxy::ProxyPlan::Direct(evidence) | proxy::ProxyPlan::Unavailable(evidence) => evidence,
+        proxy::ProxyPlan::Proxy(_) => unreachable!("proxy probing returns evidence"),
+    });
+    let application_transport = if proxy_transport.mode == "proxy" {
+        "proxy"
+    } else {
+        "direct"
+    };
+    let proxy_mode = if cli.proxy_url.is_some() {
+        "explicit"
+    } else if cli.proxy_mode == ProxyMode::Environment {
+        "environment"
+    } else {
+        "direct"
+    };
     let mut report = DiagnosticReport {
         schema_version: SCHEMA_VERSION,
         kind: "diagnostic_report".to_owned(),
@@ -120,8 +189,9 @@ pub async fn diagnose_with_context(
             } else {
                 AddressFamilySelection::Any
             },
-            application_transport: "direct".to_owned(),
-            proxy_mode: "detect_only".to_owned(),
+            application_transport: application_transport.to_owned(),
+            proxy_mode: proxy_mode.to_owned(),
+            redaction: "standard".to_owned(),
             execution_context: context.execution,
         },
         target: TargetReport::from(&target),
@@ -130,6 +200,9 @@ pub async fn diagnose_with_context(
         tcp,
         application_attempts,
         proxies: context.proxies,
+        proxy_transport,
+        path_evidence,
+        plugins,
         diagnosis: model::Diagnosis::default(),
         overall: Status::Skip,
         exit_code: 2,
@@ -139,13 +212,9 @@ pub async fn diagnose_with_context(
     Ok(report)
 }
 
-fn proxy_variables() -> Vec<ProxyVariable> {
-    proxy_variables_from_lookup(|name| std::env::var(name).ok())
-}
-
-fn proxy_variables_from_lookup(
+fn proxy_environment_from_lookup(
     mut lookup: impl FnMut(&str) -> Option<String>,
-) -> Vec<ProxyVariable> {
+) -> Vec<(String, String)> {
     const NAMES: [&str; 8] = [
         "HTTPS_PROXY",
         "https_proxy",
@@ -162,10 +231,17 @@ fn proxy_variables_from_lookup(
         .filter_map(|name| {
             lookup(name)
                 .filter(|value| !value.is_empty())
-                .map(|value| ProxyVariable {
-                    name: name.to_owned(),
-                    value: redact_proxy_value(name, &value),
-                })
+                .map(|value| (name.to_owned(), value))
+        })
+        .collect()
+}
+
+fn report_proxy_variables(environment: &[(String, String)]) -> Vec<ProxyVariable> {
+    environment
+        .iter()
+        .map(|(name, value)| ProxyVariable {
+            name: name.clone(),
+            value: redact_proxy_value(name, value),
         })
         .collect()
 }

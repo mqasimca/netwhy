@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://netwhy.dev/schema/error-v1.json",
-  "title": "NetWhy error report v1",
+  "$id": "https://netwhy.dev/schema/error-v2.json",
+  "title": "NetWhy error report v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "kind", "tool", "overall", "exit_code", "error"],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "kind": { "const": "error" },
     "tool": { "$ref": "#/$defs/tool" },
     "overall": { "const": "fail" },

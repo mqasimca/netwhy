@@ -75,6 +75,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
+      - name: Install Linux package builders
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install --yes dpkg-dev rpm
       - name: Confirm native build target
         shell: bash
         env:
@@ -114,6 +117,27 @@ jobs:
           tar -C "$staging" -czf "$archive" "$archive_root"
           digest="$(openssl dgst -sha256 "$archive" | awk '{print $NF}')"
           printf '%s  %s\n' "$digest" "$(basename "$archive")" > "${archive}.sha256"
+      - name: Build Debian and RPM packages
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: packaging/build-linux-packages.sh "$VERSION" "$TARGET" "target/$TARGET/release/netwhy" dist
+      - name: Validate Debian and RPM metadata
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dpkg-deb --info dist/*.deb >/dev/null
+          rpm --query --package --info dist/*.rpm >/dev/null
+      - name: Build Homebrew formula
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: packaging/build-homebrew-formula.sh "$VERSION" "dist/netwhy-v${VERSION}-${TARGET}.tar.gz" dist
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
@@ -140,11 +164,16 @@ jobs:
           shopt -s nullglob
           archives=(dist/*.tar.gz)
           checksums=(dist/*.tar.gz.sha256)
-          if (( ${#archives[@]} != 2 || ${#checksums[@]} != 2 )); then
-            echo "Expected two release archives and two checksums" >&2
+          debs=(dist/*.deb)
+          rpms=(dist/*.rpm)
+          formulas=(dist/netwhy.rb)
+          package_checksums=(dist/*-packages.sha256)
+          if (( ${#archives[@]} != 2 || ${#checksums[@]} != 2 || ${#debs[@]} != 1 || ${#rpms[@]} != 1 || ${#formulas[@]} != 1 || ${#package_checksums[@]} != 1 )); then
+            echo "Expected archives, checksums, one Debian package, one RPM package, and one Homebrew formula" >&2
             exit 1
           fi
           (cd dist && sha256sum -c ./*.tar.gz.sha256)
+          (cd dist && sha256sum -c ./*-packages.sha256)
       - name: Create or update release
         shell: bash
         env:
@@ -155,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/*.tar.gz dist/*.tar.gz.sha256)
+          assets=(dist/*.tar.gz dist/*.tar.gz.sha256 dist/*.deb dist/*.rpm dist/*-packages.sha256 dist/netwhy.rb)
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --clobber

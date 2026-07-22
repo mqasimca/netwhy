@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://netwhy.dev/schema/comparison-v1.json",
+  "title": "NetWhy comparison report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "tool",
+    "left",
+    "right",
+    "changes",
+    "truncated",
+    "summary",
+    "overall",
+    "exit_code"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "comparison_report" },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "netwhy" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "left": { "$ref": "#/$defs/input" },
+    "right": { "$ref": "#/$defs/input" },
+    "changes": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "truncated": { "type": "boolean" },
+    "summary": { "type": "string" },
+    "overall": { "type": "string", "enum": ["pass", "warn"] },
+    "exit_code": { "const": 0 }
+  },
+  "$defs": {
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "report_schema_version", "target", "execution_context"],
+      "properties": {
+        "path": { "type": "string" },
+        "report_schema_version": { "type": "integer", "minimum": 1 },
+        "target": { "type": "string" },
+        "execution_context": {
+          "type": "string",
+          "enum": ["current_process", "process", "docker", "podman"]
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "significance", "left", "right"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^/" },
+        "significance": { "type": "string", "enum": ["low", "medium", "high"] },
+        "left": {},
+        "right": {}
+      }
+    }
+  }
+}

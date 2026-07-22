@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://netwhy.dev/schema/report-v1.json",
-  "title": "NetWhy diagnostic report v1",
+  "$id": "https://netwhy.dev/schema/report-v2.json",
+  "title": "NetWhy diagnostic report v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -17,12 +17,15 @@
     "tcp",
     "application_attempts",
     "proxies",
+    "proxy_transport",
+    "path_evidence",
+    "plugins",
     "diagnosis",
     "overall",
     "exit_code"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "kind": { "const": "diagnostic_report" },
     "tool": { "$ref": "#/$defs/tool" },
     "generated_at_unix_ms": { "type": "integer", "minimum": 0 },
@@ -45,6 +48,13 @@
     "proxies": {
       "type": "array",
       "items": { "$ref": "#/$defs/proxy" }
+    },
+    "proxy_transport": { "$ref": "#/$defs/proxy_transport" },
+    "path_evidence": { "$ref": "#/$defs/path_evidence" },
+    "plugins": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/plugin" }
     },
     "diagnosis": { "$ref": "#/$defs/diagnosis" },
     "overall": { "type": "string", "enum": ["pass", "warn", "fail"] },
@@ -96,6 +106,7 @@
                   "TCP_TIMEOUT",
                   "TCP_CONNECT_FAILED",
                   "APPLICATION_CONNECT_FAILED",
+                  "PROXY_CONNECTION_FAILED",
                   "TLS_HANDSHAKE_FAILED",
                   "HTTP_EXCHANGE_FAILED"
                 ]
@@ -128,13 +139,15 @@
         "address_family",
         "application_transport",
         "proxy_mode",
+        "redaction",
         "execution_context"
       ],
       "properties": {
         "timeout_ms": { "type": "integer", "minimum": 1 },
         "address_family": { "type": "string", "enum": ["any", "ipv4", "ipv6"] },
-        "application_transport": { "const": "direct" },
-        "proxy_mode": { "const": "detect_only" },
+        "application_transport": { "type": "string", "enum": ["direct", "proxy"] },
+        "proxy_mode": { "type": "string", "enum": ["direct", "environment", "explicit"] },
+        "redaction": { "type": "string", "enum": ["standard", "strict"] },
         "execution_context": { "$ref": "#/$defs/execution_context" }
       }
     },
@@ -287,6 +300,8 @@
         "interface": { "type": "string" },
         "gateway": { "type": "string" },
         "source": { "type": "string" },
+        "mtu": { "type": "integer", "minimum": 1 },
+        "advmss": { "type": "integer", "minimum": 1 },
         "error_kind": {
           "type": "string",
           "enum": ["tool_missing", "tool_failed", "parse_error", "timeout", "no_route"]
@@ -313,7 +328,7 @@
       "required": ["status", "protocol", "address", "connect"],
       "properties": {
         "status": { "type": "string", "enum": ["pass", "warn", "fail"] },
-        "protocol": { "type": "string", "enum": ["http", "https"] },
+        "protocol": { "type": "string", "enum": ["tcp", "http", "https"] },
         "address": { "type": "string" },
         "connect": { "$ref": "#/$defs/connect" },
         "tls": { "$ref": "#/$defs/tls" },
@@ -373,13 +388,17 @@
     "tls": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "handshake_ms", "trust_source"],
+      "required": ["status", "handshake_ms", "trust_source", "peer_certificates"],
       "properties": {
         "status": { "type": "string", "enum": ["pass", "fail"] },
         "handshake_ms": { "type": "integer", "minimum": 0 },
         "trust_source": { "const": "mozilla_webpki_roots" },
         "version": { "type": "string" },
         "cipher_suite": { "type": "string" },
+        "peer_certificates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/certificate" }
+        },
         "error": { "type": "string" }
       }
     },
@@ -402,6 +421,208 @@
       "properties": {
         "name": { "type": "string" },
         "value": { "type": "string" }
+      }
+    },
+    "certificate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "position",
+        "der_bytes",
+        "sha256",
+        "dns_names",
+        "ip_addresses"
+      ],
+      "properties": {
+        "position": { "type": "integer", "minimum": 0 },
+        "der_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "subject": { "type": "string" },
+        "issuer": { "type": "string" },
+        "serial_number": { "type": "string" },
+        "not_before_unix": { "type": "integer" },
+        "not_after_unix": { "type": "integer" },
+        "dns_names": { "type": "array", "items": { "type": "string" } },
+        "ip_addresses": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "proxy_transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "mode", "bypassed", "attempts"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "mode": { "type": "string", "enum": ["direct", "environment", "proxy"] },
+        "selected_proxy": { "type": "string" },
+        "bypassed": { "type": "boolean" },
+        "attempts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/proxy_connect" }
+        },
+        "error_kind": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "proxy_connect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "address", "duration_ms"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail"] },
+        "address": { "type": "string" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "tunnel_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "error_kind": { "$ref": "#/$defs/connect_error_kind" },
+        "error": { "type": "string" }
+      }
+    },
+    "path_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "firewall",
+        "mtu",
+        "address_preference",
+        "resolver",
+        "network_manager"
+      ],
+      "properties": {
+        "firewall": { "$ref": "#/$defs/firewall" },
+        "mtu": { "type": "array", "items": { "$ref": "#/$defs/mtu" } },
+        "address_preference": { "$ref": "#/$defs/address_preference" },
+        "resolver": { "$ref": "#/$defs/resolver" },
+        "network_manager": { "$ref": "#/$defs/network_manager" }
+      }
+    },
+    "firewall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "mode",
+        "inspected_rules",
+        "relevant_base_chains",
+        "matches",
+        "incomplete"
+      ],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "mode": { "const": "static_read_only" },
+        "inspected_rules": { "type": "integer", "minimum": 0 },
+        "relevant_base_chains": { "type": "array", "items": { "type": "string" } },
+        "matches": { "type": "array", "items": { "$ref": "#/$defs/firewall_match" } },
+        "incomplete": { "type": "boolean" },
+        "error_kind": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "firewall_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table", "chain", "verdict", "confidence"],
+      "properties": {
+        "table": { "type": "string" },
+        "chain": { "type": "string" },
+        "handle": { "type": "integer", "minimum": 0 },
+        "verdict": { "type": "string" },
+        "confidence": { "type": "string", "enum": ["exact", "possible"] },
+        "comment": { "type": "string" }
+      }
+    },
+    "mtu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "address"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "address": { "type": "string" },
+        "route_mtu": { "type": "integer", "minimum": 1 },
+        "discovered_pmtu": { "type": "integer", "minimum": 1 },
+        "error_kind": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "address_preference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "resolver_order", "policy_source", "policy_rules"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "first_resolved_family": { "type": "string", "enum": ["ipv4", "ipv6"] },
+        "resolver_order": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["ipv4", "ipv6"] },
+          "uniqueItems": true
+        },
+        "policy_source": { "type": "string" },
+        "policy_rules": { "type": "array", "items": { "type": "string" } },
+        "error": { "type": "string" }
+      }
+    },
+    "resolver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "manager", "global_servers", "global_domains", "links"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "manager": { "type": "string" },
+        "global_servers": { "type": "array", "items": { "type": "string" } },
+        "global_domains": { "type": "array", "items": { "type": "string" } },
+        "links": { "type": "array", "items": { "$ref": "#/$defs/resolver_link" } },
+        "error_kind": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "resolver_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "name", "servers", "domains"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1 },
+        "name": { "type": "string" },
+        "servers": { "type": "array", "items": { "type": "string" } },
+        "domains": { "type": "array", "items": { "type": "string" } },
+        "default_route": { "type": "boolean" }
+      }
+    },
+    "network_manager": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "active_connections", "vpn_active"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "active_connections": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/active_connection" }
+        },
+        "vpn_active": { "type": "boolean" },
+        "error_kind": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "active_connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "connection_type", "device", "vpn"],
+      "properties": {
+        "name": { "type": "string" },
+        "connection_type": { "type": "string" },
+        "device": { "type": "string" },
+        "vpn": { "type": "boolean" }
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "name", "status", "summary", "evidence"],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
+        "status": { "$ref": "#/$defs/status" },
+        "summary": { "type": "string", "maxLength": 4096 },
+        "evidence": {},
+        "error_kind": { "type": "string" },
+        "error": { "type": "string" }
       }
     },
     "connect_error_kind": {
@@ -437,6 +658,7 @@
             "ADDRESS_FAMILY_PARTIAL",
             "APPLICATION_ADDRESS_PARTIAL",
             "APPLICATION_CONNECT_FAILED",
+            "PROXY_CONNECTION_FAILED",
             "TLS_HANDSHAKE_FAILED",
             "HTTP_EXCHANGE_FAILED",
             "HTTP_ERROR_STATUS"

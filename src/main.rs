@@ -10,10 +10,14 @@ mod container_context;
 #[cfg(target_os = "linux")]
 mod process_context;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 #[cfg(target_os = "linux")]
 use container_context::{ContainerRuntime, ensure_container_pid_unchanged, resolve_container_pid};
-use netwhy::{DiagnosticContext, ErrorCode, ErrorReport, cli::Cli, diagnose_with_context, output};
+use netwhy::{
+    DiagnosticContext, ErrorCode, ErrorReport,
+    cli::{Cli, CompareCli, CompletionShell, CompletionsCli, RedactionLevel, ReportCli},
+    compare, diagnose_with_context, output, redaction, validate_options,
+};
 #[cfg(target_os = "linux")]
 use process_context::PreparedProcessContext;
 use serde::Serialize;
@@ -21,11 +25,30 @@ use tokio::runtime::{Builder, Runtime};
 
 fn main() -> ExitCode {
     let args = std::env::args_os().collect::<Vec<_>>();
-    let json_requested = requests_json(&args);
-    let cli = match parse_cli(args, json_requested) {
+    let command = command_name(&args);
+    let json_requested = requests_json(&args) || command == Some("report");
+    if command == Some("compare") {
+        return run_compare(args, json_requested);
+    }
+    if command == Some("completions") {
+        return run_completions(args);
+    }
+    let (cli, redaction_level) = match parse_diagnostic_invocation(args, json_requested, command) {
         Ok(cli) => cli,
         Err(exit_code) => return exit_code,
     };
+    if let Err(error) = validate_options(&cli) {
+        if json_requested {
+            return emit_json_error(
+                ErrorCode::InvalidInvocation,
+                error.to_string(),
+                "Check --proxy-url and use no more than eight --plugin options.",
+            );
+        }
+        eprintln!("netwhy: invalid invocation: {error}");
+        eprintln!("Hint: check --proxy-url and use no more than eight --plugin options.");
+        return ExitCode::from(2);
+    }
     let context = match prepare_context(&cli) {
         Ok(context) => context,
         Err(error) if cli.json => {
@@ -62,13 +85,49 @@ fn main() -> ExitCode {
         }
     };
 
-    let exit_code = runtime.block_on(run(cli, context));
+    let exit_code = runtime.block_on(run(cli, context, redaction_level));
     shutdown_runtime(runtime);
     exit_code
 }
 
+fn command_name(args: &[OsString]) -> Option<&'static str> {
+    match args.get(1).and_then(|argument| argument.to_str()) {
+        Some("report") => Some("report"),
+        Some("compare") => Some("compare"),
+        Some("completions") => Some("completions"),
+        _ => None,
+    }
+}
+
+fn parse_diagnostic_invocation(
+    mut args: Vec<OsString>,
+    json_requested: bool,
+    command: Option<&str>,
+) -> Result<(Cli, Option<RedactionLevel>), ExitCode> {
+    if command == Some("report") {
+        args.remove(1);
+        return parse_parser::<ReportCli>(args, true).map(|mut report| {
+            // `report` is an always-JSON command, including failures that happen
+            // after argument parsing (context selection, target parsing, and
+            // runtime setup).
+            report.diagnostic.json = true;
+            (
+                Cli {
+                    diagnostic: report.diagnostic,
+                },
+                Some(report.redaction),
+            )
+        });
+    }
+    parse_cli(args, json_requested).map(|cli| (cli, None))
+}
+
 fn parse_cli(args: Vec<OsString>, json_requested: bool) -> Result<Cli, ExitCode> {
-    match Cli::try_parse_from(args) {
+    parse_parser(args, json_requested)
+}
+
+fn parse_parser<T: Parser>(args: Vec<OsString>, json_requested: bool) -> Result<T, ExitCode> {
+    match T::try_parse_from(args) {
         Ok(cli) => Ok(cli),
         Err(error) if error.exit_code() == 0 => {
             let _ = error.print();
@@ -85,6 +144,80 @@ fn parse_cli(args: Vec<OsString>, json_requested: bool) -> Result<Cli, ExitCode>
                 let _ = error.print();
                 Err(ExitCode::from(2))
             }
+        }
+    }
+}
+
+fn run_compare(mut args: Vec<OsString>, json_requested: bool) -> ExitCode {
+    args.remove(1);
+    let cli = match parse_parser::<CompareCli>(args, json_requested) {
+        Ok(cli) => cli,
+        Err(exit_code) => return exit_code,
+    };
+    match compare::compare_files(&cli.left, &cli.right) {
+        Ok(report) if cli.json => emit_json(&report, report.exit_code),
+        Ok(report) => emit_text(&compare::render_human(&report), report.exit_code, false),
+        Err(error) if cli.json => emit_json_error(
+            ErrorCode::InvalidInvocation,
+            error.to_string(),
+            "Provide two readable NetWhy diagnostic JSON reports no larger than 8 MiB.",
+        ),
+        Err(error) => {
+            eprintln!("netwhy: could not compare reports: {error:#}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_completions(mut args: Vec<OsString>) -> ExitCode {
+    args.remove(1);
+    let cli = match parse_parser::<CompletionsCli>(args, false) {
+        Ok(cli) => cli,
+        Err(exit_code) => return exit_code,
+    };
+    let mut command = Cli::command();
+    command = command
+        .subcommand(ReportCli::command().name("report"))
+        .subcommand(CompareCli::command().name("compare"))
+        .subcommand(CompletionsCli::command().name("completions"));
+    let mut output = Vec::new();
+    match cli.shell {
+        CompletionShell::Bash => clap_complete::generate(
+            clap_complete::shells::Bash,
+            &mut command,
+            "netwhy",
+            &mut output,
+        ),
+        CompletionShell::Elvish => clap_complete::generate(
+            clap_complete::shells::Elvish,
+            &mut command,
+            "netwhy",
+            &mut output,
+        ),
+        CompletionShell::Fish => clap_complete::generate(
+            clap_complete::shells::Fish,
+            &mut command,
+            "netwhy",
+            &mut output,
+        ),
+        CompletionShell::Powershell => clap_complete::generate(
+            clap_complete::shells::PowerShell,
+            &mut command,
+            "netwhy",
+            &mut output,
+        ),
+        CompletionShell::Zsh => clap_complete::generate(
+            clap_complete::shells::Zsh,
+            &mut command,
+            "netwhy",
+            &mut output,
+        ),
+    }
+    match String::from_utf8(output) {
+        Ok(output) => emit_text(&output, 0, false),
+        Err(error) => {
+            eprintln!("netwhy: generated completion output was not UTF-8: {error}");
+            ExitCode::from(2)
         }
     }
 }
@@ -174,8 +307,19 @@ fn shutdown_runtime(runtime: Runtime) {
     runtime.shutdown_timeout(Duration::ZERO);
 }
 
-async fn run(cli: Cli, context: DiagnosticContext) -> ExitCode {
-    match diagnose_with_context(&cli, context).await {
+async fn run(
+    cli: Cli,
+    context: DiagnosticContext,
+    redaction_level: Option<RedactionLevel>,
+) -> ExitCode {
+    match Box::pin(diagnose_with_context(&cli, context)).await {
+        Ok(mut report) if redaction_level.is_some() => {
+            redaction::apply(
+                &mut report,
+                redaction_level.expect("report mode has a redaction level"),
+            );
+            emit_json(&report, report.exit_code)
+        }
         Ok(report) if cli.json => emit_json(&report, report.exit_code),
         Ok(report) => emit_text(&output::render_human(&report), report.exit_code, false),
         Err(error) if cli.json => emit_json_error(

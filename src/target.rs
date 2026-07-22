@@ -122,6 +122,16 @@ impl Target {
     }
 
     #[must_use]
+    pub fn proxy_request_uri(&self) -> String {
+        let Some(url) = &self.url else {
+            return self.request_path();
+        };
+        let mut url = url.clone();
+        url.set_fragment(None);
+        url.to_string()
+    }
+
+    #[must_use]
     pub fn host_header(&self) -> String {
         let host = if self.host.contains(':') {
             format!("[{}]", self.host.trim_matches(['[', ']']))
@@ -137,6 +147,16 @@ impl Target {
         } else {
             format!("{host}:{}", self.port)
         }
+    }
+
+    #[must_use]
+    pub fn connection_authority(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host.trim_matches(['[', ']']))
+        } else {
+            self.host.clone()
+        };
+        format!("{host}:{}", self.port)
     }
 
     #[must_use]
@@ -331,8 +351,14 @@ mod tests {
 
         assert_eq!(target.request_path(), "/search?q=rust");
         assert_eq!(target.host_header(), "example.com");
+        assert_eq!(target.connection_authority(), "example.com:443");
+        assert_eq!(
+            target.proxy_request_uri(),
+            "https://example.com/search?q=rust"
+        );
         assert_eq!(non_default.request_path(), "/");
         assert_eq!(non_default.host_header(), "example.com:8080");
+        assert_eq!(non_default.connection_authority(), "example.com:8080");
         assert_eq!(tcp.request_path(), "/");
         assert_eq!(tcp.host_header(), "example.com:443");
         assert_eq!(tcp.url_report_value(), "example.com:443");

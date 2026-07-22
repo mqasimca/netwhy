@@ -4,7 +4,9 @@ use serde::Serialize;
 
 use crate::target::Target;
 
-pub const SCHEMA_VERSION: u8 = 1;
+pub const SCHEMA_VERSION: u8 = 2;
+pub const COMPARISON_SCHEMA_VERSION: u8 = 1;
+pub const PLUGIN_SCHEMA_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolInfo {
@@ -52,6 +54,9 @@ pub struct DiagnosticReport {
     pub tcp: Vec<TcpResult>,
     pub application_attempts: Vec<ApplicationReport>,
     pub proxies: Vec<ProxyVariable>,
+    pub proxy_transport: ProxyTransportEvidence,
+    pub path_evidence: PathEvidence,
+    pub plugins: Vec<PluginResult>,
     pub diagnosis: Diagnosis,
     pub overall: Status,
     pub exit_code: u8,
@@ -63,6 +68,7 @@ pub struct RequestInfo {
     pub address_family: AddressFamilySelection,
     pub application_transport: String,
     pub proxy_mode: String,
+    pub redaction: String,
     pub execution_context: ExecutionContextInfo,
 }
 
@@ -186,6 +192,10 @@ pub struct RouteResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advmss: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -251,8 +261,28 @@ pub struct TlsResult {
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cipher_suite: Option<String>,
+    pub peer_certificates: Vec<CertificateInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CertificateInfo {
+    pub position: usize,
+    pub der_bytes: usize,
+    pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_before_unix: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_after_unix: Option<i64>,
+    pub dns_names: Vec<String>,
+    pub ip_addresses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,6 +303,247 @@ pub struct ProxyVariable {
     pub value: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyTransportEvidence {
+    pub status: Status,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_proxy: Option<String>,
+    pub bypassed: bool,
+    pub attempts: Vec<ProxyConnectResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Default for ProxyTransportEvidence {
+    fn default() -> Self {
+        Self {
+            status: Status::Skip,
+            mode: "direct".to_owned(),
+            selected_proxy: None,
+            bypassed: false,
+            attempts: Vec::new(),
+            error_kind: None,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyConnectResult {
+    pub status: Status,
+    pub address: SocketAddr,
+    pub duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PathEvidence {
+    pub firewall: FirewallEvidence,
+    pub mtu: Vec<MtuResult>,
+    pub address_preference: AddressPreferenceEvidence,
+    pub resolver: ResolverEvidence,
+    pub network_manager: NetworkManagerEvidence,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FirewallEvidence {
+    pub status: Status,
+    pub mode: String,
+    pub inspected_rules: usize,
+    pub relevant_base_chains: Vec<String>,
+    pub matches: Vec<FirewallMatch>,
+    pub incomplete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Default for FirewallEvidence {
+    fn default() -> Self {
+        Self {
+            status: Status::Skip,
+            mode: "static_read_only".to_owned(),
+            inspected_rules: 0,
+            relevant_base_chains: Vec::new(),
+            matches: Vec::new(),
+            incomplete: true,
+            error_kind: Some("not_run".to_owned()),
+            error: Some("nftables evidence was not collected".to_owned()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FirewallMatch {
+    pub table: String,
+    pub chain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<u64>,
+    pub verdict: String,
+    pub confidence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MtuResult {
+    pub status: Status,
+    pub address: SocketAddr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_mtu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovered_pmtu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddressPreferenceEvidence {
+    pub status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_resolved_family: Option<AddressFamily>,
+    pub resolver_order: Vec<AddressFamily>,
+    pub policy_source: String,
+    pub policy_rules: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Default for AddressPreferenceEvidence {
+    fn default() -> Self {
+        Self {
+            status: Status::Skip,
+            first_resolved_family: None,
+            resolver_order: Vec::new(),
+            policy_source: "system_default".to_owned(),
+            policy_rules: Vec::new(),
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolverEvidence {
+    pub status: Status,
+    pub manager: String,
+    pub global_servers: Vec<String>,
+    pub global_domains: Vec<String>,
+    pub links: Vec<ResolverLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Default for ResolverEvidence {
+    fn default() -> Self {
+        Self {
+            status: Status::Skip,
+            manager: "system_resolver".to_owned(),
+            global_servers: Vec::new(),
+            global_domains: Vec::new(),
+            links: Vec::new(),
+            error_kind: Some("not_run".to_owned()),
+            error: Some("per-link resolver evidence was not collected".to_owned()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolverLink {
+    pub index: u32,
+    pub name: String,
+    pub servers: Vec<String>,
+    pub domains: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_route: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkManagerEvidence {
+    pub status: Status,
+    pub active_connections: Vec<ActiveConnection>,
+    pub vpn_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Default for NetworkManagerEvidence {
+    fn default() -> Self {
+        Self {
+            status: Status::Skip,
+            active_connections: Vec::new(),
+            vpn_active: false,
+            error_kind: Some("not_run".to_owned()),
+            error: Some("NetworkManager evidence was not collected".to_owned()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveConnection {
+    pub name: String,
+    pub connection_type: String,
+    pub device: String,
+    pub vpn: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginResult {
+    pub protocol_version: u8,
+    pub name: String,
+    pub status: Status,
+    pub summary: String,
+    pub evidence: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ComparisonReport {
+    pub schema_version: u8,
+    pub kind: String,
+    pub tool: ToolInfo,
+    pub left: ComparisonInput,
+    pub right: ComparisonInput,
+    pub changes: Vec<ComparisonChange>,
+    pub truncated: bool,
+    pub summary: String,
+    pub overall: Status,
+    pub exit_code: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ComparisonInput {
+    pub path: String,
+    pub report_schema_version: u64,
+    pub target: String,
+    pub execution_context: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ComparisonChange {
+    pub path: String,
+    pub significance: String,
+    pub left: serde_json::Value,
+    pub right: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DiagnosisCode {
@@ -285,6 +556,7 @@ pub enum DiagnosisCode {
     AddressFamilyPartial,
     ApplicationAddressPartial,
     ApplicationConnectFailed,
+    ProxyConnectionFailed,
     TlsHandshakeFailed,
     HttpExchangeFailed,
     HttpErrorStatus,

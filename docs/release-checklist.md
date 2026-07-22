@@ -67,4 +67,4 @@ The following remain later-version work and do not block v0.1:
 - report comparison;
 - distribution-specific packages and public release automation (implemented in the development tree but outside the v0.1 boundary).
 
-The current development tree includes `--pid`, local Docker and Podman adapters, same-context subprocess coverage, real isolated mount/network/root entry, the cross-user-namespace denial path, and public release automation. This historical v0.1 checklist does not promote that work into the v0.1 acceptance boundary. See the [v0.2 release checklist](v0.2-release-checklist.md) for the active boundary.
+The current development tree now implements every later-version feature listed above, including proxy transport, Linux path evidence, report comparison, distribution packages, strict redaction, plugins, completions, and certificate metadata. This historical v0.1 checklist does not promote that work into the v0.1 acceptance boundary. See the [v0.2 release checklist](v0.2-release-checklist.md) for the active automated and native-host boundary.

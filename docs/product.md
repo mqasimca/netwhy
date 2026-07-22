@@ -83,6 +83,7 @@ NetWhy identifies the earliest failed layer for which it has direct evidence:
 7. **HTTP failure:** transport succeeds but no valid HTTP status is received.
 8. **HTTP error response:** connectivity succeeds, but the application returns 4xx or 5xx.
 9. **Partial family or application-address failure:** one resolved family or endpoint works while another fails.
+10. **Proxy failure:** explicitly selected proxy resolution, connection, authentication, or tunneling fails before the target protocol is reachable.
 
 The wording must distinguish evidence from inference. For example, a timeout supports “traffic is probably being dropped” but cannot prove which firewall or hop is responsible.
 
@@ -109,17 +110,22 @@ The checked items are implemented in the current development tree. They are not 
 
 ### v0.3 — Deeper Linux path evidence
 
-- nftables verdict tracing where permitted.
-- MTU and IPv6 preference diagnostics.
-- systemd-resolved detail and per-link DNS evidence.
-- NetworkManager and VPN context.
+- [x] Read-only nftables ruleset analysis with exact versus possible match confidence.
+- [x] Kernel route MTU/advertised MSS, bounded tracepath PMTU, and IPv4/IPv6 preference evidence.
+- [x] systemd-resolved global and per-link DNS evidence.
+- [x] NetworkManager active-connection and VPN context.
 
 ### v0.4 — Comparison and support workflows
 
-- `netwhy report` with configurable redaction.
-- `netwhy compare host.json container.json`.
-- Stable plugin interface for environment-specific evidence.
-- Shell completions and distribution packages.
+- [x] `netwhy report` with visible standard or strict redaction.
+- [x] `netwhy compare host.json container.json` with bounded, schema-version-aware structural differences.
+- [x] Stable v1 plugin interface for explicitly selected environment-specific evidence.
+- [x] Bash, Elvish, Fish, PowerShell, and Zsh completions.
+- [x] Debian, RPM, and Apple Silicon Homebrew release packaging.
+- [x] HTTP, HTTPS, SOCKS5, and SOCKS5H proxy transport with credential redaction.
+- [x] Validated peer-certificate identity, validity, serial, size, and SHA-256 evidence.
+
+All v0.3 and v0.4 feature items are implemented and covered by automated tests in the development tree. Publication is still gated by the native-host and real-runtime checks listed in [the v0.2 release checklist](v0.2-release-checklist.md); automated tests cannot substitute for those external environments.
 
 ## Product risks
 

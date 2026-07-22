@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://netwhy.dev/schema/plugin-v1.json",
+  "title": "NetWhy evidence plugin protocol v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "name", "status", "summary"],
+  "properties": {
+    "protocol_version": { "const": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
+    "status": { "type": "string", "enum": ["pass", "warn", "fail", "skip"] },
+    "summary": { "type": "string", "maxLength": 4096 },
+    "evidence": {},
+    "error_kind": { "type": "string" },
+    "error": { "type": "string" }
+  }
+}
