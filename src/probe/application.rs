@@ -1015,31 +1015,31 @@ fn certificate_details(
                 .map(|(_, value)| value);
             let mut dns_names = Vec::new();
             let mut ip_addresses = Vec::new();
-            if let Some(parsed) = &parsed {
-                if let Ok(Some(names)) = parsed.subject_alternative_name() {
-                    for name in &names.value.general_names {
-                        match name {
-                            x509_parser::extensions::GeneralName::DNSName(value) => {
-                                dns_names.push(sanitize_report_text(value));
-                            }
-                            x509_parser::extensions::GeneralName::IPAddress(bytes) => {
-                                let address = match bytes.len() {
-                                    4 => <[u8; 4]>::try_from(*bytes)
-                                        .ok()
-                                        .map(std::net::Ipv4Addr::from)
-                                        .map(std::net::IpAddr::V4),
-                                    16 => <[u8; 16]>::try_from(*bytes)
-                                        .ok()
-                                        .map(std::net::Ipv6Addr::from)
-                                        .map(std::net::IpAddr::V6),
-                                    _ => None,
-                                };
-                                if let Some(address) = address {
-                                    ip_addresses.push(address.to_string());
-                                }
-                            }
-                            _ => {}
+            if let Some(parsed) = &parsed
+                && let Ok(Some(names)) = parsed.subject_alternative_name()
+            {
+                for name in &names.value.general_names {
+                    match name {
+                        x509_parser::extensions::GeneralName::DNSName(value) => {
+                            dns_names.push(sanitize_report_text(value));
                         }
+                        x509_parser::extensions::GeneralName::IPAddress(bytes) => {
+                            let address = match bytes.len() {
+                                4 => <[u8; 4]>::try_from(*bytes)
+                                    .ok()
+                                    .map(std::net::Ipv4Addr::from)
+                                    .map(std::net::IpAddr::V4),
+                                16 => <[u8; 16]>::try_from(*bytes)
+                                    .ok()
+                                    .map(std::net::Ipv6Addr::from)
+                                    .map(std::net::IpAddr::V6),
+                                _ => None,
+                            };
+                            if let Some(address) = address {
+                                ip_addresses.push(address.to_string());
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

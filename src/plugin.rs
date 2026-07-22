@@ -353,17 +353,21 @@ mod tests {
             invoke_plugin(PathBuf::from("/netwhy-missing-plugin"), Vec::new(), timeout).await;
         assert_eq!(missing.error_kind.as_deref(), Some("tool_missing"));
 
-        for (script, expected) in [
-            ("exit 7", "tool_failed"),
-            ("printf 'bad error' >&2; exit 7", "tool_failed"),
-            ("sleep 1", "timeout"),
-            ("yes x | head -c 300000", "output_truncated"),
-            ("printf 'not-json'", "protocol_error"),
+        for (script, expected, operation_timeout) in [
+            ("exit 7", "tool_failed", timeout),
+            ("printf 'bad error' >&2; exit 7", "tool_failed", timeout),
+            ("sleep 1", "timeout", timeout),
+            (
+                "yes x | head -c 300000",
+                "output_truncated",
+                Duration::from_secs(5),
+            ),
+            ("printf 'not-json'", "protocol_error", timeout),
         ] {
             let result = invoke_plugin(
                 PathBuf::from("/bin/sh"),
                 [OsString::from("-c"), OsString::from(script)].to_vec(),
-                timeout,
+                operation_timeout,
             )
             .await;
             assert_eq!(result.error_kind.as_deref(), Some(expected), "{script}");
@@ -398,7 +402,7 @@ mod tests {
         assert!(arguments.iter().any(|argument| argument == "8443"));
 
         let results = collect(
-            &[PathBuf::from("/bin/echo"), PathBuf::from("/bin/false")],
+            &[PathBuf::from("/bin/echo"), PathBuf::from("/usr/bin/false")],
             &target,
             Duration::from_millis(250),
         )

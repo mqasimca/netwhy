@@ -250,7 +250,7 @@ fn help_and_version_are_plain_text_metadata_commands() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("--podman"));
     assert_eq!(
         String::from_utf8_lossy(&version.stdout).trim(),
-        "netwhy 0.2.0"
+        format!("netwhy {}", env!("CARGO_PKG_VERSION"))
     );
 
     for output in [

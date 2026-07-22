@@ -502,7 +502,10 @@ mod tests {
 
         let output = render_human(&report);
 
-        assert!(output.starts_with("NetWhy 0.2.0\nResult: WARN\n"));
+        assert!(output.starts_with(&format!(
+            "NetWhy {}\nResult: WARN\n",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert!(output.contains("Interpreted as: https://[2001:db8::1]:8443"));
         assert!(output.contains("Likely cause (inference): partial connectivity"));
         assert!(output.contains("  1. Inspect the failing family."));

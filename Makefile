@@ -1,5 +1,5 @@
 CARGO ?= cargo
-MSRV_CARGO ?= rustup run 1.85.0 cargo
+MSRV_CARGO ?= rustup run 1.88.0 cargo
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
 BINDIR ?= $(PREFIX)/bin

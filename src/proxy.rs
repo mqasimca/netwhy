@@ -305,12 +305,11 @@ fn split_no_proxy_port(entry: &str) -> (&str, Option<u16>) {
                 .and_then(|value| value.parse().ok()),
         );
     }
-    if entry.matches(':').count() == 1 {
-        if let Some((host, port)) = entry.rsplit_once(':') {
-            if let Ok(port) = port.parse() {
-                return (host, Some(port));
-            }
-        }
+    if entry.matches(':').count() == 1
+        && let Some((host, port)) = entry.rsplit_once(':')
+        && let Ok(port) = port.parse()
+    {
+        return (host, Some(port));
     }
     (entry, None)
 }

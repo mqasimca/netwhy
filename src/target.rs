@@ -51,10 +51,10 @@ impl Target {
         }
 
         let tcp_candidate = Url::parse(&format!("tcp://{input}"));
-        if let Ok(url) = tcp_candidate {
-            if url.port().is_some() {
-                return Self::from_url(input, &url);
-            }
+        if let Ok(url) = tcp_candidate
+            && url.port().is_some()
+        {
+            return Self::from_url(input, &url);
         }
 
         let url = Url::parse(&format!("https://{input}/")).with_context(|| {

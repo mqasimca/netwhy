@@ -50,7 +50,7 @@ jobs:
         with:
           components: clippy,rustfmt,llvm-tools-preview
       - name: Install minimum supported Rust version
-        run: rustup toolchain install 1.85.0 --profile minimal
+        run: rustup toolchain install 1.88.0 --profile minimal
       - name: Install coverage tool
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
       - name: Run complete release gate

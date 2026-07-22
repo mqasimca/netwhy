@@ -24,7 +24,7 @@ Evidence:
 ```
 
 > [!IMPORTANT]
-> NetWhy is an unpublished development build. The feature roadmap through v0.4 is implemented in this tree, but native Ubuntu, Fedora/rootless Podman, and Apple Silicon qualification must still be completed before publication.
+> NetWhy v0.4 is currently a prerelease. The feature roadmap through v0.4 is implemented, but native Ubuntu, Fedora/rootless Podman, and Apple Silicon qualification must still be completed before a stable release.
 
 ## Principles
 
@@ -138,7 +138,7 @@ Reports reject target URL credentials, redact target query strings and fragments
 
 ## Development
 
-NetWhy requires Rust 1.85 or newer. Stable Rust is recommended. Supported build targets are Linux and `aarch64-apple-darwin`; Intel macOS is intentionally unsupported.
+NetWhy requires Rust 1.88 or newer. Stable Rust is recommended. Supported build targets are Linux and `aarch64-apple-darwin`; Intel macOS is intentionally unsupported.
 
 ```bash
 cargo build
@@ -160,7 +160,7 @@ The complete offline release gate is one command:
 make verify
 ```
 
-`make verify` runs `make check`, enforces coverage, tests with Rust 1.85, builds and verifies the Cargo package, validates Debian/RPM/Homebrew packaging templates, and exercises staged installation, `--help`, `--version`, and uninstallation. It requires the Rust 1.85 toolchain and `cargo-llvm-cov`; it does not require a public network service.
+`make verify` runs `make check`, enforces coverage, tests with Rust 1.88, builds and verifies the Cargo package, validates Debian/RPM/Homebrew packaging templates, and exercises staged installation, `--help`, `--version`, and uninstallation. It requires the Rust 1.88 toolchain and `cargo-llvm-cov`; it does not require a public network service.
 
 The network-backed RustSec advisory audit is enforced separately in CI and before tagged releases. Run it locally with `cargo audit --file Cargo.lock` after installing `cargo-audit`.
 
@@ -222,8 +222,8 @@ Generate a completion file with, for example, `netwhy completions zsh` or `netwh
 Set the package version in `Cargo.toml`, update `Cargo.lock`, run `make verify`, and push the release commit. Then create and push a matching tag:
 
 ```bash
-git tag -a v0.2.0 -m "NetWhy v0.2.0"
-git push origin v0.2.0
+git tag -a v0.4.0-rc.1 -m "NetWhy v0.4.0-rc.1"
+git push origin v0.4.0-rc.1
 ```
 
 The release workflow requires the tag to exactly match the package version. It runs the complete Linux release gate and native Apple Silicon tests before creating or updating the GitHub Release for that tag with these assets:

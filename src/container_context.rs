@@ -85,13 +85,14 @@ pub fn ensure_container_pid_unchanged(
 }
 
 fn ensure_local_runtime(runtime: ContainerRuntime, operation_timeout: Duration) -> Result<()> {
-    if runtime == ContainerRuntime::Docker && std::env::var_os("DOCKER_CONTEXT").is_none() {
-        if let Some(endpoint) = std::env::var_os("DOCKER_HOST") {
-            let endpoint = endpoint
-                .to_str()
-                .context("DOCKER_HOST is not valid UTF-8")?;
-            return validate_runtime_locality(runtime, endpoint);
-        }
+    if runtime == ContainerRuntime::Docker
+        && std::env::var_os("DOCKER_CONTEXT").is_none()
+        && let Some(endpoint) = std::env::var_os("DOCKER_HOST")
+    {
+        let endpoint = endpoint
+            .to_str()
+            .context("DOCKER_HOST is not valid UTF-8")?;
+        return validate_runtime_locality(runtime, endpoint);
     }
 
     let output = match runtime {
