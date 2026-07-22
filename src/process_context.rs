@@ -312,8 +312,8 @@ mod tests {
     };
 
     use super::{
-        NamespaceOperations, PreparedProcessContext, execution_context, open_context_file,
-        process_path, read_bounded_environment,
+        LinuxNamespaceOperations, NamespaceOperations, PreparedProcessContext, execution_context,
+        open_context_file, process_path, read_bounded_environment,
     };
 
     #[derive(Default)]
@@ -356,6 +356,20 @@ mod tests {
         let error = read_bounded_environment(Cursor::new(b"12345"), 4).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("8 MiB safety limit"));
+    }
+
+    #[test]
+    fn real_namespace_operations_reject_a_non_namespace_file() {
+        let not_a_namespace = File::open("/dev/null").unwrap();
+        let operations = LinuxNamespaceOperations;
+
+        assert!(operations.enter_mount_namespace(&not_a_namespace).is_err());
+        assert!(operations.change_root(&not_a_namespace).is_err());
+        assert!(
+            operations
+                .enter_network_namespace(&not_a_namespace)
+                .is_err()
+        );
     }
 
     #[test]

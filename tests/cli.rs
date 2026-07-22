@@ -100,15 +100,14 @@ fn parse_json(output: &Output) -> Value {
     })
 }
 
-fn reserved_refused_address() -> (Socket, std::net::SocketAddr) {
+fn closed_local_address() -> std::net::SocketAddr {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
     socket
         .bind(&SockAddr::from(
             "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         ))
         .unwrap();
-    let address = socket.local_addr().unwrap().as_socket().unwrap();
-    (socket, address)
+    socket.local_addr().unwrap().as_socket().unwrap()
 }
 
 fn accept_with_timeout(listener: &TcpListener) -> std::net::TcpStream {
@@ -464,7 +463,7 @@ fn selected_process_context_and_proxy_environment_are_reported() {
         .unwrap();
     let pid = process.id();
     let pid_string = pid.to_string();
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
 
     let output = netwhy(&[
         "--json",
@@ -515,7 +514,7 @@ fn selected_process_context_and_proxy_environment_are_reported() {
 #[test]
 #[cfg(target_os = "linux")]
 fn docker_and_podman_contexts_are_resolved_and_reported() {
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
     let target = address.to_string();
     let script = r#"#!/bin/sh
 if [ "$1" = context ]; then
@@ -575,7 +574,7 @@ printf '%s\n' "$PPID"
 #[test]
 #[cfg(target_os = "linux")]
 fn container_identifier_cannot_be_parsed_as_a_runtime_option() {
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
     let target = address.to_string();
     let script = r#"#!/bin/sh
 if [ "$1" = context ]; then
@@ -673,7 +672,7 @@ fn remote_container_runtimes_are_rejected_before_pid_resolution() {
 #[test]
 #[cfg(target_os = "linux")]
 fn docker_host_locality_is_validated_without_running_a_context_command() {
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
     let target = address.to_string();
     let script = r#"#!/bin/sh
 [ "$1" = container ] || exit 91
@@ -808,7 +807,7 @@ fn container_runtime_inspection_honors_the_timeout() {
 #[test]
 #[cfg(target_os = "linux")]
 fn container_runtime_descendants_cannot_extend_the_operation_deadline() {
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
     let target = address.to_string();
     let started = std::time::Instant::now();
     let output = netwhy_with_fake_runtime(
@@ -958,8 +957,7 @@ fn output_error_retryability_is_enforced_by_the_schema() {
 
 #[test]
 fn refused_connection_exits_one() {
-    let (reservation, address) = reserved_refused_address();
-    drop(reservation);
+    let address = closed_local_address();
 
     let output = netwhy(&[&address.to_string(), "--timeout-ms", "250"]);
 
@@ -1279,7 +1277,7 @@ fn iproute2_descendants_cannot_extend_the_operation_deadline() {
 
 #[test]
 fn closed_output_pipe_does_not_turn_a_diagnosis_into_an_internal_error() {
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
     let mut child = Command::new(env!("CARGO_BIN_EXE_netwhy"))
         .args([
             address.to_string(),
@@ -1300,7 +1298,7 @@ fn closed_output_pipe_does_not_turn_a_diagnosis_into_an_internal_error() {
 #[test]
 #[cfg(target_os = "linux")]
 fn unwritable_stdout_is_reported_for_human_and_json_output() {
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
     let target = address.to_string();
 
     let human = netwhy_with_unwritable_stdout(&[&target, "--timeout-ms", "250"]);
@@ -1417,7 +1415,7 @@ fn report_command_applies_visible_strict_redaction() {
 
 #[test]
 fn compare_command_emits_schema_valid_json_and_human_output() {
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
     let source = netwhy(&["--json", &address.to_string(), "--timeout-ms", "100"]);
     assert_eq!(source.status.code(), Some(1));
     let left = unique_temp_path("compare-left.json");
@@ -1481,7 +1479,7 @@ fn external_plugin_protocol_is_bounded_parsed_and_reported() {
     let mut permissions = fs::metadata(&plugin).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&plugin, permissions).unwrap();
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
 
     let output = netwhy(&[
         "--json",

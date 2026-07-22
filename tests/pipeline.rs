@@ -11,15 +11,14 @@ fn cli_for(target: &str) -> Cli {
     Cli::try_parse_from(["netwhy", target, "--timeout-ms", "500"]).unwrap()
 }
 
-fn reserved_refused_address() -> (Socket, std::net::SocketAddr) {
+fn closed_local_address() -> std::net::SocketAddr {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
     socket
         .bind(&SockAddr::from(
             "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         ))
         .unwrap();
-    let address = socket.local_addr().unwrap().as_socket().unwrap();
-    (socket, address)
+    socket.local_addr().unwrap().as_socket().unwrap()
 }
 
 async fn accept_with_timeout(listener: &TcpListener) -> tokio::net::TcpStream {
@@ -73,7 +72,7 @@ async fn raw_tcp_listener_passes() {
 
 #[tokio::test]
 async fn refused_port_is_explained() {
-    let (_reservation, address) = reserved_refused_address();
+    let address = closed_local_address();
 
     let report = diagnose(&cli_for(&address.to_string())).await.unwrap();
 
@@ -274,7 +273,7 @@ async fn explicit_http_proxy_can_resolve_and_reach_the_target_remotely() {
 
 #[tokio::test]
 async fn refused_proxy_connection_is_structured_and_explained() {
-    let (_reservation, proxy_address) = reserved_refused_address();
+    let proxy_address = closed_local_address();
     let mut cli = cli_for("http://does-not-exist.invalid/health");
     cli.proxy_url = Some(format!("http://{proxy_address}"));
     cli.timeout_ms = 1_000;
