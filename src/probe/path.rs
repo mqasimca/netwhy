@@ -156,6 +156,7 @@ async fn inspect_firewall(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::unused_async)] // Keep one awaitable collector interface across platforms.
 async fn inspect_firewall(
     _addresses: &[SocketAddr],
     _routes: &[RouteResult],
@@ -477,6 +478,7 @@ async fn inspect_mtu(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::unused_async)] // Keep one awaitable collector interface across platforms.
 async fn inspect_mtu(
     addresses: &[SocketAddr],
     routes: &[RouteResult],
@@ -639,6 +641,7 @@ async fn inspect_resolver(operation_timeout: Duration) -> ResolverEvidence {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::unused_async)] // Keep one awaitable collector interface across platforms.
 async fn inspect_resolver(_operation_timeout: Duration) -> ResolverEvidence {
     skipped_resolver(
         "unsupported_platform",
@@ -807,6 +810,7 @@ async fn inspect_network_manager(operation_timeout: Duration) -> NetworkManagerE
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::unused_async)] // Keep one awaitable collector interface across platforms.
 async fn inspect_network_manager(_operation_timeout: Duration) -> NetworkManagerEvidence {
     skipped_network_manager(
         "unsupported_platform",
