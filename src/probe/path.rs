@@ -1,31 +1,42 @@
 use std::{
-    collections::{BTreeSet, HashMap},
-    ffi::OsStr,
     fs::File,
     io::{self, Read},
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::Path,
     time::Duration,
 };
+
+#[cfg(any(target_os = "linux", test))]
+use std::{collections::BTreeSet, net::IpAddr};
+#[cfg(target_os = "linux")]
+use std::{collections::HashMap, ffi::OsStr};
 
 use nix::{
     fcntl::{OFlag, open},
     sys::stat::Mode,
 };
+#[cfg(any(target_os = "linux", test))]
 use serde_json::Value;
+#[cfg(target_os = "linux")]
 use tokio::task::JoinSet;
 
+#[cfg(any(target_os = "linux", test))]
+use crate::command::BoundedOutput;
+#[cfg(target_os = "linux")]
+use crate::command::{BoundedCommandError, run_bounded};
+#[cfg(any(target_os = "linux", test))]
+use crate::model::{ActiveConnection, FirewallMatch, ResolverLink};
 use crate::{
-    command::{BoundedCommandError, BoundedOutput, run_bounded},
     model::{
-        ActiveConnection, AddressFamily, AddressPreferenceEvidence, FirewallEvidence,
-        FirewallMatch, MtuResult, NetworkManagerEvidence, PathEvidence, ResolverEvidence,
-        ResolverLink, RouteResult, Status,
+        AddressFamily, AddressPreferenceEvidence, FirewallEvidence, MtuResult,
+        NetworkManagerEvidence, PathEvidence, ResolverEvidence, RouteResult, Status,
     },
     sanitize_report_text,
 };
 
+#[cfg(target_os = "linux")]
 const STANDARD_OUTPUT_LIMIT: usize = 256 * 1024;
+#[cfg(target_os = "linux")]
 const NFT_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const GAI_CONF_LIMIT: usize = 64 * 1024;
 
@@ -168,6 +179,7 @@ async fn inspect_firewall(
     )
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_nft_output(
     addresses: &[SocketAddr],
     routes: &[RouteResult],
@@ -195,6 +207,7 @@ fn parse_nft_output(
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_nft_ruleset(
     addresses: &[SocketAddr],
     routes: &[RouteResult],
@@ -291,6 +304,7 @@ fn parse_nft_ruleset(
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Applicability {
     No,
@@ -298,6 +312,7 @@ enum Applicability {
     Possible,
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn rule_applicability(
     family: &str,
     expressions: &[Value],
@@ -329,6 +344,7 @@ fn rule_applicability(
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn family_applicability(family: &str, addresses: &[SocketAddr]) -> Applicability {
     match family {
         "ip" if addresses.iter().any(SocketAddr::is_ipv4) => Applicability::Exact,
@@ -341,6 +357,7 @@ fn family_applicability(family: &str, addresses: &[SocketAddr]) -> Applicability
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn is_non_predicate_expression(expression: &Value) -> bool {
     extract_verdict(expression).is_some()
         || expression.as_object().is_some_and(|object| {
@@ -351,6 +368,7 @@ fn is_non_predicate_expression(expression: &Value) -> bool {
         })
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn evaluate_match(
     matcher: &Value,
     addresses: &[SocketAddr],
@@ -403,6 +421,7 @@ fn evaluate_match(
     None
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn extract_verdict(expression: &Value) -> Option<String> {
     for verdict in [
         "accept", "drop", "reject", "return", "continue", "jump", "goto",
@@ -418,6 +437,7 @@ fn extract_verdict(expression: &Value) -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn string_value(value: &Value, name: &str) -> String {
     value
         .get(name)
@@ -585,6 +605,7 @@ async fn inspect_one_mtu(
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn tracepath_destination(address: SocketAddr) -> String {
     match address {
         SocketAddr::V6(address) if address.scope_id() != 0 => {
@@ -594,6 +615,7 @@ fn tracepath_destination(address: SocketAddr) -> String {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn suspicious_mtu(
     address: SocketAddr,
     discovered_pmtu: Option<u32>,
@@ -603,6 +625,7 @@ fn suspicious_mtu(
     discovered_pmtu.is_some_and(|mtu| mtu < minimum || route_mtu.is_some_and(|route| mtu < route))
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_tracepath_pmtu(output: &[u8]) -> Option<u32> {
     let text = String::from_utf8_lossy(output);
     let tokens = text.split_whitespace().collect::<Vec<_>>();
@@ -649,6 +672,7 @@ async fn inspect_resolver(_operation_timeout: Duration) -> ResolverEvidence {
     )
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_resolvectl_status(output: &[u8]) -> Result<ResolverEvidence, String> {
     let text = std::str::from_utf8(output)
         .map_err(|error| format!("invalid resolvectl output: {error}"))?;
@@ -748,6 +772,7 @@ fn parse_resolvectl_status(output: &[u8]) -> Result<ResolverEvidence, String> {
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn push_unique_words(destination: &mut Vec<String>, value: &str) {
     for item in value.split_whitespace().map(sanitize_report_text) {
         if !destination.contains(&item) {
@@ -756,6 +781,7 @@ fn push_unique_words(destination: &mut Vec<String>, value: &str) {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_yes_no(value: &str) -> Option<bool> {
     match value {
         "yes" => Some(true),
@@ -818,6 +844,7 @@ async fn inspect_network_manager(_operation_timeout: Duration) -> NetworkManager
     )
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_nmcli_active(output: &[u8]) -> Result<NetworkManagerEvidence, String> {
     let text =
         std::str::from_utf8(output).map_err(|error| format!("invalid nmcli output: {error}"))?;
@@ -853,6 +880,7 @@ fn parse_nmcli_active(output: &[u8]) -> Result<NetworkManagerEvidence, String> {
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn split_nmcli_fields(line: &str) -> Vec<String> {
     let mut fields = vec![String::new()];
     let mut escaped = false;
@@ -882,6 +910,7 @@ fn skipped_network_manager(kind: &str, error: &str) -> NetworkManagerEvidence {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn command_error(output: &BoundedOutput, fallback: &str) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr.bytes)
         .trim()
